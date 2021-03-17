@@ -536,7 +536,7 @@ def _gen_roi_func_dist_beam(h_factor, nb, bsp, min_radius, offsets):
 
     return roi
 
-
+# Function for defining the locations and characteristics of the multistatic network
 def makeRadarStruct():
     radar = {}
     radar['txPos'] = np.array([0,-15,0])*1e3 #Tx position
@@ -564,6 +564,7 @@ def makeRadarStruct():
     radar['receiverGain'] = 45 #Receiver gain (dB)
     return radar
 
+# Function for defining the basic characteristics of the simulation volume
 def makeWxStruct():
     wx = {}
     wx['scatMode'] = 'rayleigh' #Rayleigh or Bragg scattering
@@ -691,6 +692,8 @@ def datenum64(d):
 #     else:
 #         print('Specified volume out of bounds.')
 
+# Function for getting NWP data for a given set of query points
+# NOTE: you may have to permute your input data axes, the function assumes (x,y,z) ordering!
 def getWrf(xq,yq,zq):
     #Unit tested
     fh = Dataset('may20.nc', 'r')
