@@ -9,7 +9,7 @@ Created on Tue Mar 30 14:47:17 2021
 # Script for generating T-matrix lookup tables for passive radar simulations
 
 from pytmatrix.tmatrix import Scatterer
-from pytmatrix.psd import PSDIntegrator, GammaPSD, ExponentialPSD
+from pytmatrix.psd import PSDIntegrator, GammaPSD, ExponentialPSD, UnnormalizedGammaPSD
 from pytmatrix import orientation, radar, tmatrix_aux, refractive
 import numpy as np
 import lzma,pickle
@@ -28,11 +28,16 @@ def drop_ar(D_eq):
 def hail_ar(D_eq):
     return 1.0/(1.1749+0.9697/D_eq)
 
+def snow_ar(D_eq):
+    return 0.856*D_eq**-0.113
+
 p_dict = {}
 p_dict['dry_hail'] = {}
 p_dict['dry_hail'][103.1] = 3.17-0.001j
 p_dict['dry_hail'][54.1] = 3.17-0.001j
 p_dict['dry_hail'][31.4] = 3.17-0.002j
+p_dict['hail_a'] = {}
+p_dict['hail_a'][103.1] = 3.0316 - 0.00102j
 p_dict['hail'] = {}
 p_dict['hail'][103.1] = 8.63-1.63j
 p_dict['hail'][54.1] = 7.52-2.58j
@@ -45,99 +50,220 @@ p_dict['rain'] = {}
 p_dict['rain'][103.1] = 80.89-19.92j
 p_dict['rain'][54.1] = 68.38-33.45j
 p_dict['rain'][31.4] = 47.92-39.55j
+p_dict['dry_snow'] = {}
+p_dict['dry_snow'][103.1] = 1.39-1e-6j
+p_dict['dry_snow'][54.1] = 1.39-1e-6j
+p_dict['dry_snow'][31.4] = 1.39-1e-6j
 
 ptype = 'hail'
-Lambda = 31.4
+Lambda = 54.1
 ep = p_dict[ptype][Lambda]
 m = np.sqrt((np.abs(ep)+np.real(ep))/2) + np.sqrt((np.abs(ep)-np.real(ep))/2)*1j
-
-nsAz = 91
-nsZe = 91
-niZe = 46
-nr = 40
+nsAz = 361
+saz = np.linspace(0,180,nsAz)
+nr = 240
 if ptype == 'rain':
     rads = np.linspace(0.1,4.0,nr)
 else:
-    rads = np.linspace(1,nr,nr)
-sv = np.zeros((nr,niZe,nsZe,nsAz))
-sh = np.zeros((nr,niZe,nsZe,nsAz))
-# zdr = np.zeros((nr,niZe,nsZe,nsAz))
-for n,r in enumerate(rads):
-    print(r)
-    if ptype == 'rain':
-        ar = 1.0/drop_ar(2*r)
-    else:
-        ar = 1.0/hail_ar(2*r)
-    scatterer = Scatterer(radius=r,axis_ratio=0.6,wavelength=Lambda, m=m, ndgs=3)
-    #scatterer.psd_integrator = PSDIntegrator()
-    #scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/drop_ar(D)
-    #scatterer.psd_integrator.axis_ratio_func = lambda D: 0.8
-    #scatterer.psd_integrator.D_max = 100.0
-    #scatterer.psd_integrator.num_points = 16
-    #scatterer.psd_integrator.geometries = ()
-    geometries = ()
+    rads = np.linspace(1,(nr+3)/4,nr)
+ize = 90.0
+sze = 90.0
+iaz = 0.0
+# #saz,rads = np.meshgrid(saz,rads)
+
+# # scatterer.psd_integrator = PSDIntegrator()
+# # if ptype == 'rain':
+# #     scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/drop_ar(D)
+# # elif ptype == 'dry_snow':
+# #     scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/snow_ar(D)
+# # else:
+# #     scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/hail_ar(D)
+
+
+# #scatterer.psd_integrator.axis_ratio_func = lambda D: 0.8
+# # Dm = 40.0
+# # scatterer.psd_integrator.D_max = Dm
+# # scatterer.psd_integrator.num_points = 32
+# # scatterer.psd_integrator.geometries = ()
+
+# sh = np.zeros((nsAz,nr))
+# sv = np.zeros((nsAz,nr))
+# dco = np.zeros((nsAz,nr))
+# dh = np.zeros((nsAz,nr))
+# dv = np.zeros((nsAz,nr))
+# for j,rad in enumerate(rads):
+#     scatterer = Scatterer(radius=rad,wavelength=Lambda, m=m, ndgs=3, axis_ratio=1/hail_ar(2*rad))
+#     scatterer.set_geometry(tmatrix_aux.geom_horiz_forw) 
+#     for i,az in enumerate(saz):
+#         geom = (ize, sze, 0.0, az, 0.0, 0.0)
+#         # geom = tmatrix_aux.geom_horiz_back
+#         scatterer.set_geometry(geom)
+#         sh[i,j] = radar.refl(scatterer)
+#         sv[i,j] = radar.refl(scatterer,False)
+#         dco[i,j] = radar.delta_hv(scatterer)
+#         S = scatterer.get_S()
+#         dv[i,j] = np.angle(S[0,0])
+#         dh[i,j] = np.angle(S[1,1])
+# #     # refh[it.multi_index] = 10*np.log10(radar.refl(scatterer))
+# #     # zdr[idx] = radar.Zdr(scatterer)
+# #     # rho[it.multi_index] = radar.rho_hv(scatterer)
+# sh = np.concatenate((sh,sh[:0:-1,:]),axis=0)
+# sv = np.concatenate((sv,sv[:0:-1,:]),axis=0)
+# dco = np.concatenate((dco,dco[:0:-1,:]),axis=0)
+# dv = np.concatenate((dv,dv[:0:-1,:]),axis=0)
+# dh = np.concatenate((dh,dh[:0:-1,:]),axis=0)
+
+
+nsAz = 46
+nsZe = 46
+niZe = 46
+nl = 46
+nn0 = 36
+# if ptype == 'rain':
+#     rads = np.linspace(0.1,4.0,nr)
+# else:
+#     rads = np.linspace(1,nr,nr)
+# svv = np.zeros((nn0,nl,niZe,nsZe,nsAz)).astype('complex64')
+# shh = np.zeros((nn0,nl,niZe,nsZe,nsAz)).astype('complex64')
+# svh = np.zeros((nn0,nl,niZe,nsZe,nsAz)).astype('complex64')
+# shv = np.zeros((nn0,nl,niZe,nsZe,nsAz)).astype('complex64')
+sv = np.zeros((nn0,nl,niZe,nsZe,nsAz)).astype('complex64')
+sh = np.zeros((nn0,nl,niZe,nsZe,nsAz)).astype('complex64')
+Av = np.zeros((nn0,nl))
+Ah = np.zeros((nn0,nl))
+Kv = np.zeros((nn0,nl))
+Kh = np.zeros((nn0,nl))
+cdr = np.zeros((nn0,nl))
+lambs = 10**np.linspace(-0.5,1.7,nl)
+n0s = 10**np.linspace(-10,7,nn0)
+lambs,n0s = np.meshgrid(lambs,n0s)
+iter0 = np.nditer(lambs,flags=['multi_index'])
+scatterer = Scatterer(wavelength=Lambda, m=m, ndgs=3)
+scatterer.psd_integrator = PSDIntegrator()
+if ptype == 'rain':
+    scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/drop_ar(D)
+elif ptype == 'dry_snow':
+    scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/snow_ar(D)
+else:
+    scatterer.psd_integrator.axis_ratio_func = lambda D: 1.0/hail_ar(D)
+
+
+#scatterer.psd_integrator.axis_ratio_func = lambda D: 0.8
+if ptype in ['rain','snow']:
+    Dm = 8.0
+else:
+    Dm = 40.0
+scatterer.psd_integrator.D_max = Dm
+scatterer.psd_integrator.num_points = 32
+scatterer.psd_integrator.geometries = ()
+ize = np.linspace(0,90,niZe)+90
+sze = np.linspace(0,180,nsZe)
+saz = np.linspace(0,180,nsAz)
+sze,ize,saz = np.meshgrid(sze,ize,saz)
+iter1 = np.nditer(sze,flags=['multi_index'])
+for x in iter1:
+    scatterer.psd_integrator.geometries += ((ize[iter1.multi_index], sze[iter1.multi_index], 0.0, saz[iter1.multi_index], 0.0, 0.0),)
+scatterer.psd_integrator.geometries += (tmatrix_aux.geom_horiz_forw,)
+scatterer.psd_integrator.init_scatter_table(scatterer,verbose=False)
+scatterer.set_geometry(tmatrix_aux.geom_horiz_forw)
+for y in iter0:
+    print(np.log10(lambs[iter0.multi_index]),np.log10(n0s[iter0.multi_index]))
+    scatterer.psd = ExponentialPSD(N0 = n0s[iter0.multi_index],Lambda=lambs[iter0.multi_index],D_max=Dm)
+    #scatterer.psd = UnnormalizedGammaPSD(N0 = 10**5,Lambda=10,D_max=Dm)
+    #geometries = ()
     
-    ize = np.linspace(0,90,niZe)+90
-    sze = np.linspace(0,180,nsZe)
-    saz = np.linspace(0,180,nsAz)
-    sze,ize,saz = np.meshgrid(sze,ize,saz)
-    
-    # for i in range(nsAz):
-    #     for j in range(nsZe):
-    #         for k in range(niZe):
-    #             print(i,j,k)
-    #             #scatterer.psd_integrator.geometries += ((k*22.5+90, j, 0.0, i, 0.0, 0.0),)
     #             geometries += ((k*22.5+90, j, 0.0, i, 0.0, 0.0),)
-    scatterer.or_pdf = orientation.gaussian_pdf(std=30.0)
-    # scatterer.orient = orientation.orient_averaged_fixed
-    # start = timer()
-    # scatterer.psd_integrator.init_scatter_table(scatterer,verbose=True)
-    # end = timer()
-    # time = end-start
-    # print(time)
-    #scatterer.psd = ExponentialPSD(N0 = 1e2,Lambda= 0.025,D_max=100.0)
+    scatterer.or_pdf = orientation.gaussian_pdf(std=10.0)
     
-    it = np.nditer(sze,flags=['multi_index'])
-    for x in it:
-        geom = (ize[it.multi_index], sze[it.multi_index], 0.0, saz[it.multi_index], 0.0, 0.0)
-        scatterer.set_geometry(geom)
-        idx = (n,) + it.multi_index
-        # refh[it.multi_index] = 10*np.log10(radar.refl(scatterer))
-        # zdr[idx] = radar.Zdr(scatterer)
-        # rho[it.multi_index] = radar.rho_hv(scatterer)
-        sh[idx] = 4*np.pi*np.abs(scatterer.get_S()[1,1])**2
-        sv[idx] = 4*np.pi*np.abs(scatterer.get_S()[0,0])**2
+    S = scatterer.get_S()
+#     Z = scatterer.get_Z()
+#     cdr[iter0.multi_index] = (Z[0,0]+Z[3,0]+Z[0,3]+Z[3,3])/(2*(Z[0,0]+Z[3,0]))
+    Kh[iter0.multi_index] = 1e-3*180/np.pi*scatterer.wavelength/1e3*S[1,1].real
+    Kv[iter0.multi_index] = 1e-3*180/np.pi*scatterer.wavelength/1e3*S[0,0].real
+    Ah[iter0.multi_index] = 8.686e-3*scatterer.wavelength/1e3*S[1,1].imag
+    Av[iter0.multi_index] = 8.686e-3*scatterer.wavelength/1e3*S[0,0].imag
+    
+# # scatterer.orient = orientation.orient_averaged_fixed
+# # start = timer()
 
-nsh = np.concatenate((sh,sh[:,:,:,:0:-1]),axis=3).T
-nsv= np.concatenate((sv,sv[:,:,:,:0:-1]),axis=3).T
+# # end = timer()
+# # time = end-start
+# # print(time)
+# #
+
+    # iter2 = np.nditer(sze,flags=['multi_index'])
+    # for x in iter2:
+    #     geom = (ize[iter2.multi_index], sze[iter2.multi_index], 0.0, saz[iter2.multi_index], 0.0, 0.0)
+    #     # geom = tmatrix_aux.geom_horiz_back
+    #     scatterer.set_geometry(geom)
+    #     idx = iter0.multi_index + iter2.multi_index
+    
+    # # refh[it.multi_index] = 10*np.log10(radar.refl(scatterer))
+    # # zdr[idx] = radar.Zdr(scatterer)
+    # # rho[it.multi_index] = radar.rho_hv(scatterer)
+    #     sh[idx] = radar.refl(scatterer)
+    #     sv[idx] = radar.refl(scatterer,False)
+        # S = scatterer.get_S()
+        # shh[idx] = S[1,1]
+        # shv[idx] = S[1,0]
+        # svh[idx] = S[0,1]
+        # svv[idx] = S[0,0]
+        #Z = scatterer.get_Z()
+        # sh[idx] = np.arctan2(Z[1,3]-Z[0,3],Z[0,2]-Z[1,2])
+        #sh[idx] = (Z[0,0]+Z[3,0]+Z[0,3]+Z[3,3])/(2*(Z[0,0]+Z[3,0]))
+        # sv[idx] = np.arctan2(Z[1,3]+Z[0,3],Z[0,2]+Z[1,2])
+        
+
+# nsh = np.concatenate((sh,sh[:,:,:,:,:0:-1]),axis=4).T
+# nsv = np.concatenate((sv,sv[:,:,:,:,:0:-1]),axis=4).T
+# nshh = np.concatenate((shh,shh[:,:,:,:,:0:-1]),axis=4).T
+# nsvv = np.concatenate((svv,svv[:,:,:,:,:0:-1]),axis=4).T
+# nshv = np.concatenate((shv,shv[:,:,:,:,:0:-1]),axis=4).T
+# nsvh = np.concatenate((svh,svh[:,:,:,:,:0:-1]),axis=4).T
+# nsh = nshh.astype('float32')
+# nsv = nsvv.astype('float32')
+
+# # phi = np.linspace(0,180,nsZe)*np.pi/180
+# # theta = np.linspace(0,360,nsAz*2-1)*np.pi/180
+# # phi,theta = np.meshgrid(phi,theta)
 
 
 
-phi = np.linspace(0,180,nsZe)*np.pi/180
-theta = np.linspace(0,360,nsAz*2-1)*np.pi/180
-phi,theta = np.meshgrid(phi,theta)
 
+# # a = 0
+# # d = 39
+# # nsv = nsv[:,:,a,d]
+# # nsh = nsh[:,:,a,d]
+# # nsv = np.log10(nsv)
+# # nsh = np.log10(nsh)
+# # nsv[np.abs(nsv) > 15] = np.nan
+# # nsh[np.abs(nsh) > 15] = np.nan
 
+# # x = nsh*np.cos(theta)*np.sin(phi)
+# # y = nsh*np.sin(theta)*np.sin(phi)
+# # z = nsh*np.cos(phi)
 
+# ref = (np.linspace(0,2*np.pi,91),np.linspace(0,np.pi,46),np.linspace(0,np.pi/2,46),np.log10(n0s[:,0]),np.log10(lambs[0,:]))
+# with lzma.open(f'{scatterer.wavelength}mm_S_{ptype}_New.xz','wb') as f:
+#     pickle.dump(ref,f)
+#     pickle.dump(nsv,f)
+#     pickle.dump(nsh,f)
+    # pickle.dump(nsvv,f)
+    # pickle.dump(nsvh,f)
+    # pickle.dump(nshv,f)
+    # pickle.dump(nshh,f)
 
-a = 0
-d = 39
-nsv = nsv[:,:,a,d]
-nsh = nsh[:,:,a,d]
-nsv = np.log10(nsv)
-nsh = np.log10(nsh)
-nsv[np.abs(nsv) > 15] = np.nan
-nsh[np.abs(nsh) > 15] = np.nan
-
-# x = nsh*np.cos(theta)*np.sin(phi)
-# y = nsh*np.sin(theta)*np.sin(phi)
-# z = nsh*np.cos(phi)
-
-ref = (np.linspace(0,2*np.pi,181),np.linspace(0,np.pi,91),np.linspace(0,np.pi/2,46),rads)
-with lzma.open(f'{scatterer.wavelength}mm_S_{ptype}.xz','wb') as f:
+ref = (np.log10(n0s[:,0]),np.log10(lambs[0,:]))
+with lzma.open(f'{scatterer.wavelength}mm_A_{ptype}.xz','wb') as f:
     pickle.dump(ref,f)
-    pickle.dump(nsv,f)
-    pickle.dump(nsh,f)
+    pickle.dump(Av,f)
+    pickle.dump(Ah,f)
+
+ref = (np.log10(n0s[:,0]),np.log10(lambs[0,:]))
+with lzma.open(f'{scatterer.wavelength}mm_K_{ptype}.xz','wb') as f:
+    pickle.dump(ref,f)
+    pickle.dump(Kv,f)
+    pickle.dump(Kh,f)
 # X = x
 # Y = y
 # Z = z
