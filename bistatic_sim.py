@@ -5,11 +5,12 @@ Created on Thu Sep 17 13:53:46 2020
 
 @author: semmerson
 """
-import os, pickle, lzma
+import os, pickle, lzma,math
 import numpy as np
 import numexpr as ne
 import matplotlib.colors as colors
 import datetime as dt
+from multiprocessing import Pool
 from netCDF4 import Dataset
 from scipy.fftpack import fft2, fftshift
 from scipy import interpolate, signal
@@ -215,27 +216,28 @@ def makeRadarStruct(txPos,rxPos,modes=[True,False,False]):
     radar['rxPos'] = rxPos #Rx position 
     radar['lambda'] = 0.1031 #Operating wavelength
     radar['prt'] = 1/2000  #Tx PRT (s)
-    radar['tau'] = 1.57e-6 #Pulse width (s)
+    radar['tau'] = 1.5e-6 #Pulse width (s)
     radar['fs'] = 1/radar['tau'] #Sampling Rate samples/s
-    radar['Pt'] = 1000e3 #Peak transmit power (W)
+    radar['Pt'] = 750e3 #Peak transmit power (W)
     radar['Tant'] = 63.36 #Antenna noise temp/brightness
     radar['Frx'] = 3 #Rx noise figure
     radar['M'] = 8 #Pulses per dwell
-    radar['rxMechTilt'] = 1.0 #Mechanical tilt of Rx antenna
+    radar['rxMechTilt'] = 10.0 #Mechanical tilt of Rx antenna
+    radar['rxOrient'] = 'horizontal'
     radar['txMechEl'] = np.array([0.5])#Mechanical Tx elevation tilt 
     radar['txMechAz'] = 1 #Baseline mechanical Tx position
-    radar['txAz'] = np.mod(np.linspace(0,360,721),360) #Transmit azimuths
+    radar['txAz'] = np.mod(np.linspace(270,360,91),360) #Transmit azimuths
     radar['txEl'] = np.zeros(radar['txAz'].shape) #Electrical tx steering elv.
     radar['txG'] = 45.5 #Transmit antenna gain (dBi)
-    radar['rxG'] = 25 #Receive antenna gain (dBi)
-    radar['receiverGain'] = 50 #Receiver gain (dB)
+    radar['rxG'] = 45.5 #Receive antenna gain (dBi)
+    radar['receiverGain'] = 60 #Receiver gain (dB)
     radar['idealPat'] = modes[0] #Ideal pattern (pencil beam + no sidelobes)?
     radar['whitening'] = modes[1] #Whiten sidelobes?
     radar['dishMode'] = modes[2] #Emulate WSR-88D transmit pattern?
     radar['tmMode'] = True #T-matrix scattering?
     radar['saveMode'] = True #Save radar outputs?
-    radar['ptypes'] = ['rain','hail'] #Precipitation type(s) for T-matrix scattering
-    radar['attenuationMode'] = True #Include attenuation + phase shift?
+    radar['ptypes'] = ['rain','wet_hail'] #Precipitation type(s) for T-matrix scattering
+    radar['attenuationMode'] = False #Include attenuation + phase shift?
     radar['scanType'] = 'ppi'
     return radar
 
@@ -243,13 +245,14 @@ def makeRadarStruct(txPos,rxPos,modes=[True,False,False]):
 def makeWxStruct():
     wx = {}
     wx['scatMode'] = 'rayleigh' #Rayleigh or Bragg scattering
-    wx['xSize'] = 50e3 #x,y,z dimensions of simulation volume (m)
-    wx['ySize'] = 50e3
+    wx['xSize'] = 30e3 #x,y,z dimensions of simulation volume (m)
+    wx['ySize'] = 30e3
     wx['zSize'] = 0.5e3
     wx['getZh'] = 'Zh=35*np.ones((1,nPts))' #Zh/Zv values for uniform test case
-    wx['getZv'] = 'Zv=Zh'              #not currently used
+    wx['getZv'] = 'Zv=Zh'  
+    wx['wrfFile'] = ['cm1out_000001.nc','cm1out_000001.nc','cm1out_000001.nc','cm1out_000001.nc','cm1out_000001.nc'
     wx['wrfDate'] = '2013-06-01 01:20:10' #NWP data query date: yyyy-mm-dd HH:MM:SS
-    wx['wrfOffset'] = np.array([-10.0,0.0,0.25]) # offset of simulation volume np.array([-16,-6,0.5])
+    wx['wrfOffset'] = np.array([0.0,15.0,0.25]) # offset of simulation volume np.array([-16,-6,0.5])
                                                # from origin within NWP data                                           
     wx['spw'] = 2 #Spectrum width
     wx['ptsPerMinVol'] = 3 #Number of points in smallest resolution volume
@@ -258,85 +261,80 @@ def makeWxStruct():
 def datenum64(d):
     return 366 + d.item().toordinal() + (d.item() - dt.datetime.fromordinal(d.item().toordinal())).total_seconds()/(24*60*60)
 
-def getWrf(xq,yq,zq,ptypes):
+def getWrf(fName,xq,yq,zq,ptypes):
     #Unit tested    
-    fh = Dataset('cm1out_000150.nc', 'r')
-    XX = fh.variables['xh'][:]
-    YY = fh.variables['yh'][:]
-    ZZ = fh.variables['zh'][:]
-    UU = np.squeeze(fh.variables['uinterp'][:])
-    VV = np.squeeze(fh.variables['vinterp'][:])
-    WW = np.squeeze(fh.variables['winterp'][:])
-    ref = np.squeeze(fh.variables['dbz'][:])
-    # ntr = fh.variables['ncr'][0,:,:,:]
-    # qr = fh.variables['qr'][0,:,:,:]
-    # ntg = fh.variables['ncg'][0,:,:,:]
-    # qg = fh.variables['qg'][0,:,:,:]
-    # nts = fh.variables['ncs'][0,:,:,:]
-    # qs = fh.variables['qs'][0,:,:,:]
-    # fh = Dataset('cm1out.nc', 'r')
-    # XX = fh.variables['x'][:]
-    # YY = fh.variables['y'][:]
-    # ZZ = fh.variables['z'][:]
-    rhow = 997
-    rhos = 100
-    #rhog = fh.variables['qh'][:]/fh.variables['vhl'][:]
-    rhog = np.squeeze(fh.variables['qhl'][:])/np.squeeze(fh.variables['vhl'][:])
-    cr = rhow*np.pi/6
-    cs = rhos*np.pi/6
-    dr = 3
-    ds = 3
-    pr = 0
-    ps = 0
-    lambda_r = (cr*np.squeeze(fh.variables['crw'][:])*np.math.factorial(pr+dr)/np.squeeze(fh.variables['qr'][:]))**(1/dr)/1000
-    #lambda_r = np.ones(lambda_r.shape)*3
-    n0_r = np.squeeze(fh.variables['crw'][:])*lambda_r
-    #n0_r = np.ones(n0_r.shape)*1000
-    #lambda_g = (np.pi*rhog*fh.variables['chl'][:]/fh.variables['qh'][:])**(1/3)/1000
-    lambda_g = (np.pi*rhog*np.squeeze(fh.variables['chl'][:])/np.squeeze(fh.variables['qhl'][:]))**(1/3)/1000
-    n0_g = np.squeeze(fh.variables['chl'][:])*lambda_g
-    lambda_s = (cs*np.squeeze(fh.variables['csw'][:])*np.math.factorial(ps+ds)/np.squeeze(fh.variables['qs'][:]))**(1/ds)/1000
-    n0_s = np.squeeze(fh.variables['csw'][:])*lambda_s
-    # UU = fh.variables['u'][:]
-    # VV = fh.variables['v'][:]
-    # WW = fh.variables['w'][:]
-    #ref = fh.variables['reflectivity'][:]
-
-    # rhow = 997
-    # rhog = 900
-    # rhos = 100
-    # cr = rhow*np.pi/6
-    # cg = rhog*np.pi/6
-    # cs = rhos*np.pi/6
-    # dr = 3
-    # dg = 3
-    # ds = 3
-    # pr = 0
-    # pg = 0
-    # ps = 0
-    # lambda_r = (cr*ntr*np.math.factorial(pr+dr)/qr)**(1/dr)/1000
-    # n0_r = ntr*lambda_r
-    # lambda_g = (cg*ntg*np.math.factorial(pg+dg)/qg)**(1/dg)/1000
-    # n0_g = ntg*lambda_g
-    # lambda_s = (cs*nts*np.math.factorial(ps+ds)/qs)**(1/ds)/1000
-    # n0_s = nts*lambda_s
-    # fh = Dataset('wrfwof_d01_2020-08-10_18:00:00','r')
-    # UU = np.swapaxes(np.squeeze(fh.variables['U'][:]),0,2)[:-1,:,:]
-    # VV = np.swapaxes(np.squeeze(fh.variables['V'][:]),0,2)[:,:-1,:]
-    # WW = np.swapaxes(np.squeeze(fh.variables['W'][:]),0,2)[:,:,:-1]
-    # ref = np.swapaxes(np.squeeze(fh.variables['REFL_10CM'][:]),0,2)
-    # XX = (np.arange(ref.shape[0])-ref.shape[0]/2)*3
-    # YY = (np.arange(ref.shape[1])-ref.shape[1]/2)*3
-    # ZZ = np.arange(ref.shape[2])*0.5
-    #XX,YY,ZZ = np.meshgrid(XX,YY,ZZ)
-    # UU = np.swapaxes(fh.variables['u'][:],0,1)
-    # VV = np.swapaxes(fh.variables['v'][:],0,1)
-    # WW = np.swapaxes(fh.variables['w'][:],0,1)
-    # ref = np.swapaxes(fh.variables['reflectivity'][:],0,1)
-
-    # UU = np.ones_like(ref)*10
-    # VV = np.ones_like(ref)*10
-    # WW = np.zeros_like(ref)
+    fh = Dataset(fName, 'r')
+    varNames = fh.variables.keys()
+    xNames = ['x','xh']
+    xName = [name for name in xNames if name in varNames][0]
+    XX = np.squeeze(fh.variables[xName][:])
+    yNames = ['y','yh']
+    yName = [name for name in yNames if name in varNames][0]
+    YY = np.squeeze(fh.variables[yName][:])
+    zNames = ['z','zh']
+    zName = [name for name in zNames if name in varNames][0] 
+    ZZ = np.squeeze(fh.variables[zName][:])
+    uNames = ['u','uinterp']
+    uName = [name for name in uNames if name in varNames][0] 
+    UU = np.squeeze(fh.variables[uName][:])
+    vNames = ['v','vinterp']
+    vName = [name for name in vNames if name in varNames][0] 
+    VV = np.squeeze(fh.variables[vName][:])
+    wNames = ['w','winterp']
+    wName = [name for name in wNames if name in varNames][0] 
+    WW = np.squeeze(fh.variables[wName][:])
+    refNames = ['dbz','ref','reflectivity','REFL_10CM']
+    refName = [name for name in refNames if name in varNames][0]    
+    ref = np.squeeze(fh.variables[refName][:])
+    rNames = ['qr']
+    rName = [name for name in rNames if name in varNames][0] 
+    qr = np.squeeze(fh.variables[rName][:])
+    sNames = ['qs']
+    sName = [name for name in sNames if name in varNames][0] 
+    qs = np.squeeze(fh.variables[sName][:])
+    if 'vhl' in varNames:
+        print('NSSL 2-moment microphysical data assumed')
+        rhow = 997
+        rhos = 100
+        hNames = ['qh','qhl']
+        hName = [name for name in hNames if name in varNames][0]  
+        rhog = np.squeeze(fh.variables[hName][:])/np.squeeze(fh.variables['vhl'][:])
+        cr = rhow*np.pi/6
+        cs = rhos*np.pi/6
+        dr = 3
+        ds = 3
+        pr = 0
+        ps = 0
+        lambda_r = (cr*np.squeeze(fh.variables['crw'][:])*math.factorial(pr+dr)/np.squeeze(fh.variables['qr'][:]))**(1/dr)/1000
+        n0_r = np.squeeze(fh.variables['crw'][:])*lambda_r
+        lambda_g = (np.pi*rhog*np.squeeze(fh.variables['chl'][:])/np.squeeze(fh.variables[hName][:]))**(1/3)/1000
+        n0_g = np.squeeze(fh.variables['chl'][:])*lambda_g
+        lambda_s = (cs*np.squeeze(fh.variables['csw'][:])*math.factorial(ps+ds)/np.squeeze(fh.variables['qs'][:]))**(1/ds)/1000
+        n0_s = np.squeeze(fh.variables['csw'][:])*lambda_s
+    else:
+        print('Morrison microphysical data assumed')
+        ntr = np.squeeze(fh.variables['ncr'][:])
+        ntg = np.squeeze(fh.variables['ncg'][:])
+        nts = np.squeeze(fh.variables['ncs'][:])
+        qg = np.squeeze(fh.variables['qg'][:])
+        rhow = 997
+        rhog = 900
+        rhos = 100
+        cr = rhow*np.pi/6
+        cg = rhog*np.pi/6
+        cs = rhos*np.pi/6
+        dr = 3
+        dg = 3
+        ds = 3
+        pr = 0
+        pg = 0
+        ps = 0
+        lambda_r = (cr*ntr*math.factorial(pr+dr)/qr)**(1/dr)/1000
+        n0_r = ntr*lambda_r
+        lambda_g = (cg*ntg*math.factorial(pg+dg)/qg)**(1/dg)/1000
+        n0_g = ntg*lambda_g
+        lambda_s = (cs*nts*math.factorial(ps+ds)/qs)**(1/ds)/1000
+        n0_s = nts*lambda_s
     fh.close()
     #Get boundaries of NWP and query points
     pds = {}
@@ -385,11 +383,6 @@ def getWrf(xq,yq,zq,ptypes):
                 pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
                 rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_s))
                 pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)
-        # inds = np.logical_and(np.mod(np.round(xq),12) < 6,np.mod(np.round(yq),12) < 6)
-        # ref[inds] = 60
-        # uu[inds] = 20
-        # vv[inds] = 20
-        #ref = np.ones(xq.shape)*60
         return (uu,vv,ww,Zv,pds)
     else:
         print('Specified volume out of bounds.')
@@ -406,7 +399,7 @@ def init_KA_table(Lambda,ptype,_type):
     V_inter = interpolate.RegularGridInterpolator(ref,v)
     return (H_inter,V_inter)
 
-def getKA(pts,pos,nump,ptypes,table):
+def getKA(fName,pts,pos,nump,ptypes,table):
     npts = pts.shape[1]
     qpts = np.zeros((3,npts,nump))
     dr = np.zeros((3,npts))
@@ -417,62 +410,66 @@ def getKA(pts,pos,nump,ptypes,table):
     for i in range(3):
         qpts[i,:,:],dr[i,:] = np.linspace(pos[i,np.newaxis],pts[i,:],num=nump,retstep=True,axis=1)
     DR = np.sqrt(np.sum(dr**2,axis=0))
-    # qpts = np.reshape(qpts,(3,npts*nump))
-    # Aih = np.zeros(npts*nump)
-    # Aiv = np.zeros(npts*nump)
     
-    fh = Dataset('cm1out.nc', 'r')
-    XX = fh.variables['x'][:]
-    YY = fh.variables['y'][:]
-    ZZ = fh.variables['z'][:]
-    rhow = 997
-    rhos = 100
-    rhog = fh.variables['qh'][:]/fh.variables['vhl'][:]
-    cr = rhow*np.pi/6
-    cs = rhos*np.pi/6
-    dr = 3
-    ds = 3
-    pr = 0
-    ps = 0
-    lambda_r = (cr*fh.variables['crw'][:]*np.math.factorial(pr+dr)/fh.variables['qr'][:])**(1/dr)/1000
-    n0_r = fh.variables['crw'][:]*lambda_r
-    lambda_g = (np.pi*rhog*fh.variables['chl'][:]/fh.variables['qh'][:])**(1/3)/1000
-    n0_g = fh.variables['chl'][:]*lambda_g
-    lambda_s = (cs*fh.variables['csw'][:]*np.math.factorial(ps+ds)/fh.variables['qs'][:])**(1/ds)/1000
-    n0_s = fh.variables['csw'][:]*lambda_s
-    # fh = Dataset('cm1out_000489.nc', 'r')
-    # XX = fh.variables['xh'][:]
-    # YY = fh.variables['yh'][:]
-    # ZZ = fh.variables['zh'][:]
-    # ntr = fh.variables['ncr'][0,:,:,:]
-    # qr = fh.variables['qr'][0,:,:,:]
-    # ntg = fh.variables['ncg'][0,:,:,:]
-    # qg = fh.variables['qg'][0,:,:,:]
-    # nts = fh.variables['ncs'][0,:,:,:]
-    # qs = fh.variables['qs'][0,:,:,:]
-    # rhow = 997
-    # rhog = 900
-    # rhos = 100
-    # cr = rhow*np.pi/6
-    # cg = rhog*np.pi/6
-    # cs = rhos*np.pi/6
-    # dr = 3
-    # dg = 3
-    # ds = 3
-    # pr = 0
-    # pg = 0
-    # ps = 0
-    # lambda_r = (cr*ntr*np.math.factorial(pr+dr)/qr)**(1/dr)/1000
-    # n0_r = ntr*lambda_r
-    # lambda_g = (cg*ntg*np.math.factorial(pg+dg)/qg)**(1/dg)/1000
-    # n0_g = ntg*lambda_g
-    # lambda_s = (cs*nts*np.math.factorial(ps+ds)/qs)**(1/ds)/1000
-    # n0_s = nts*lambda_s
+    fh = Dataset(fName, 'r')
+    varNames = fh.variables.keys()
+    xNames = ['x','xh']
+    xName = [name for name in xNames if name in varNames][0]
+    XX = np.squeeze(fh.variables[xName][:])
+    yNames = ['y','yh']
+    yName = [name for name in yNames if name in varNames][0]
+    YY = np.squeeze(fh.variables[yName][:])
+    zNames = ['z','zh']
+    zName = [name for name in zNames if name in varNames][0] 
+    ZZ = np.squeeze(fh.variables[zName][:])
+    rNames = ['qr']
+    rName = [name for name in rNames if name in varNames][0] 
+    qr = np.squeeze(fh.variables[rName][:])
+    sNames = ['qs']
+    sName = [name for name in sNames if name in varNames][0] 
+    qs = np.squeeze(fh.variables[sName][:])
+    if 'vhl' in varNames:
+        rhow = 997
+        rhos = 100
+        hNames = ['qh','qhl']
+        hName = [name for name in hNames if name in varNames][0]  
+        rhog = np.squeeze(fh.variables[hName][:])/np.squeeze(fh.variables['vhl'][:])
+        cr = rhow*np.pi/6
+        cs = rhos*np.pi/6
+        dr = 3
+        ds = 3
+        pr = 0
+        ps = 0
+        lambda_r = (cr*np.squeeze(fh.variables['crw'][:])*math.factorial(pr+dr)/np.squeeze(fh.variables['qr'][:]))**(1/dr)/1000
+        n0_r = np.squeeze(fh.variables['crw'][:])*lambda_r
+        lambda_g = (np.pi*rhog*np.squeeze(fh.variables['chl'][:])/np.squeeze(fh.variables[hName][:]))**(1/3)/1000
+        n0_g = np.squeeze(fh.variables['chl'][:])*lambda_g
+        lambda_s = (cs*np.squeeze(fh.variables['csw'][:])*math.factorial(ps+ds)/np.squeeze(fh.variables['qs'][:]))**(1/ds)/1000
+        n0_s = np.squeeze(fh.variables['csw'][:])*lambda_s
+    else:
+        ntr = np.squeeze(fh.variables['ncr'][:])
+        ntg = np.squeeze(fh.variables['ncg'][:])
+        nts = np.squeeze(fh.variables['ncs'][:])
+        qg = np.squeeze(fh.variables['qg'][:])
+        rhow = 997
+        rhog = 900
+        rhos = 100
+        cr = rhow*np.pi/6
+        cg = rhog*np.pi/6
+        cs = rhos*np.pi/6
+        dr = 3
+        dg = 3
+        ds = 3
+        pr = 0
+        pg = 0
+        ps = 0
+        lambda_r = (cr*ntr*math.factorial(pr+dr)/qr)**(1/dr)/1000
+        n0_r = ntr*lambda_r
+        lambda_g = (cg*ntg*math.factorial(pg+dg)/qg)**(1/dg)/1000
+        n0_g = ntg*lambda_g
+        lambda_s = (cs*nts*math.factorial(ps+ds)/qs)**(1/ds)/1000
+        n0_s = nts*lambda_s
     fh.close()
-
-    #Load variables from corresponding files and spatially
-    #interpolate
-
     l_r_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_r),method='nearest')
     n_r_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_r),method='nearest')
     l_g_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_g),method='nearest')
@@ -601,7 +598,7 @@ def rotMat(axis,angle):
         R[2,2] = 1
     return R
 
-def getUlaWts(theta,phi,rxG):
+def getUlaWts(theta,phi,rxG,orient):
 #Unit tested
 #GETULAWTS evaluates antenna pattern for rx antenna (assumed it would be a
 # ula) through interpolation from table in rxPat
@@ -618,10 +615,16 @@ def getUlaWts(theta,phi,rxG):
     
     rxPatr = np.real(rxPat)
     rxPati = np.imag(rxPat)
-    inter = interpolate.RegularGridInterpolator((UU[0,:],VV[:,0]),rxPatr.T)
-    wtsr = inter(np.array([uu,vv]).T)
-    inter = interpolate.RegularGridInterpolator((UU[0,:],VV[:,0]),rxPati.T)
-    wtsi = inter(np.array([uu,vv]).T)
+    if orient == 'horizontal':
+        inter = interpolate.RegularGridInterpolator((UU[0,:],VV[:,0]),rxPatr.T)
+        wtsr = inter(np.array([uu,vv]).T)
+        inter = interpolate.RegularGridInterpolator((UU[0,:],VV[:,0]),rxPati.T)
+        wtsi = inter(np.array([uu,vv]).T)
+    elif orient == 'vertical':
+        inter = interpolate.RegularGridInterpolator((UU[0,:],VV[:,0]),rxPatr)
+        wtsr = inter(np.array([uu,vv]).T)
+        inter = interpolate.RegularGridInterpolator((UU[0,:],VV[:,0]),rxPati)
+        wtsi = inter(np.array([uu,vv]).T)
     wts = wtsr+1j*wtsi
     return wts
 
@@ -864,7 +867,7 @@ def getArrayWts2(theta,phi,interpolator,codeVal,txG):
     #
     #Output
     #wts - transmit antenna pattern weights
-    fftres = 4096
+    fftres = 256
     st = ne.evaluate('sin(theta)')
     sf = (fftres-1)/2
     uu = np.round((st*ne.evaluate('cos(phi)')+1)*sf).astype(int)
@@ -876,15 +879,14 @@ def getArrayWts2(theta,phi,interpolator,codeVal,txG):
     #wts = txPat[uu,vv]
     wts = txPat.flatten()[idx]
     return wts
-
-def calcV(mski,theta,txWts,curVwts,Pt):
-    if len(mski) > 0:
-        mskTh = np.abs(theta[mski])<np.pi/2
-        rvwt = txWts[mski[mskTh]]*curVwts[mskTh]
-        return np.sqrt(Pt)*np.sum(rvwt)
+    
+def calcV(mskI,phi,txWts,wts,Pt):
+    if len(mskI) > 0:
+        mskTh = np.abs(phi[mskI])<np.pi/2
+        wtsm = mskI[mskTh]
+        return np.sqrt(Pt)*np.einsum('i,i',txWts[wtsm],wts[mskTh])
     else:
         return 0
-    
 def localize(aa,ee,tt,rxPos,txPos):
     c = 3e8
     nRx = rxPos[:,np.newaxis].shape[1]
@@ -1095,6 +1097,7 @@ def simulate(radarStruct,wxStruct):
     txAz = radarStruct['txAz'] #Transmit azimuths
     txEl = radarStruct['txEl'] #Transmit elevations
     rxMechTilt = radarStruct['rxMechTilt'] #Mechanical tilt of rx antenna
+    rxOrient = radarStruct['rxOrient']
     txMechEl = radarStruct['txMechEl'] #Mechanical tilt of tx antenna
     txG = radarStruct['txG'] #Transmit antenna gain (dBI)
     rxG = radarStruct['rxG'] #Receive antenna gain
@@ -1111,6 +1114,7 @@ def simulate(radarStruct,wxStruct):
     xSize = wxStruct['xSize'] #Sizes of each dimension of Wx volume
     ySize = wxStruct['ySize']
     zSize = wxStruct['zSize']
+    wrfFiles = wxStruct['wrfFile']
     wrfDate = wxStruct['wrfDate'] #Date to be queried from WRF data
     
     #Spatial offset of sim volume within WRF volume
@@ -1148,7 +1152,7 @@ def simulate(radarStruct,wxStruct):
         codingWeights1 = baseWin
         codingWeights2 = baseWin
 
-    fftres = 4096;
+    fftres = 256;
     wts = np.zeros((len(codingWeights1),len(codingWeights1),4)).astype('complex128')
     wts[:,:,0] = codingWeights1*codingWeights1[:,np.newaxis]
     wts[:,:,1] = codingWeights1*codingWeights2[:,np.newaxis]
@@ -1195,7 +1199,7 @@ def simulate(radarStruct,wxStruct):
     
     # Populate scattering centers
     domainVolume = xSize*ySize*zSize
-    minVolSize = (np.sin(0.5*np.pi/180)*5e3)**2*c*tau/2
+    minVolSize = (np.sin(1.0*np.pi/180)*5e3)**2*c*tau/2
     nPts = np.round(ptsPerMinVol * domainVolume/minVolSize)
     ptVolume = domainVolume/nPts
     np.random.seed(777)
@@ -1245,7 +1249,7 @@ def simulate(radarStruct,wxStruct):
             #os.chdir('/Users/semmerson/Documents/cm1r19.10/grinder')
             #os.chdir('/Users/semmerson/Documents/python/data/may7/may_7_250m')
             #Zv,uu,vv,ww = getWrf(wrfDate,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2])
-            uu,vv,ww,Zv,pds = getWrf(pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes)
+            uu,vv,ww,Zv,pds = getWrf(wrfFile,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes)
     
             inds = np.where(np.log10(Zv) > 0)[0]
             inds = np.ones(Zv.shape).astype(bool)
@@ -1270,21 +1274,21 @@ def simulate(radarStruct,wxStruct):
             ind_l = [inds[i::nt] for i in range(nt)]
             
             del uu,vv,ww
-            if att:
+            if att and tmMode:
                 natt = 50
                 piahr = np.zeros((int(nRx),int(nPts)))
                 piavr = np.zeros((int(nRx),int(nPts)))
                 khr = np.zeros((int(nRx),int(nPts)))
                 kvr = np.zeros((int(nRx),int(nPts)))
                 print('Calculating Attenuation and Phase Shift:')
-                kht,kvt,piaht,piavt = getKA(pts/1000+wrfOffset[:,np.newaxis],txPos/1000+wrfOffset,natt,ptypes,A_table)
+                kht,kvt,piaht,piavt = getKA(wrfFile,pts/1000+wrfOffset[:,np.newaxis],txPos/1000+wrfOffset,natt,ptypes,A_table)
                 piahr[-1,:] = np.copy(piaht)
                 piavr[-1,:] = np.copy(piavt)
                 khr[-1,:] = np.copy(kht)
                 kvr[-1,:] = np.copy(kvt)
                 for i in range(nRx-1):
                     print(f'Receiver {i+1} of {nRx}')
-                    khr[i,:],kvr[i,:],piahr[i,:], piavr[i,:] = getKA(pts/1000+wrfOffset[:,np.newaxis],rxPos[i,:]/1000+wrfOffset,natt,ptypes,A_table)
+                    khr[i,:],kvr[i,:],piahr[i,:], piavr[i,:] = getKA(wrfFile,pts/1000+wrfOffset[:,np.newaxis],rxPos[i,:]/1000+wrfOffset,natt,ptypes,A_table)
             #os.chdir('/Users/semmerson/Documents/MATLAB/bistaticSimulator')
             staticHwts = np.zeros((int(nRx),int(nPts))).astype('complex64')
             staticVwts = np.zeros((int(nRx),int(nPts))).astype('complex64')
@@ -1303,7 +1307,7 @@ def simulate(radarStruct,wxStruct):
             nr = np.zeros((nRx),dtype=int)                
             for i in range(nRx):
                 brmin = np.sqrt(np.sum((rxPos[i,:]-txPos)**2))
-                brmax = 1e5
+                brmax = 1.5e5
                 # if np.all(np.isclose(rxPos[i,:],txPos)):
                 #     brmax = brmax/2
                 rr.append(np.arange(brmin,brmax,c*Ts/2))
@@ -1350,11 +1354,10 @@ def simulate(radarStruct,wxStruct):
                             hwt[inds] = np.squeeze(weights[0])
                             vwt[inds] = np.squeeze(weights[1])
     
-    
                     else:
                         weights = bistaticWeights(txPos,rxPos[ii,:],pts)
-                        hwt = np.squeeze(weights[0])
-                        vwt = np.squeeze(weights[1])
+                        hwt = np.squeeze(weights[0])*z2eta(Zv, _lambda)
+                        vwt = np.squeeze(weights[1])*z2eta(Zv, _lambda)
             
                     # Do the "receive" half of the radar range equation (doesn't
                     # change with Tx pointing angle.  Convert from Z or Cn^2 to
@@ -1364,11 +1367,14 @@ def simulate(radarStruct,wxStruct):
                         staticVwts[ii,:] = np.sqrt(vwt*ptVolume)/(4*np.pi*rxr[ii,:])*np.exp(1j*2*np.pi*rxr[ii,:]/_lambda)
                     elif scatMode == 'bragg':
                         print('bragg?')
-                    if att:
+                    if att and tmMode:
                         staticHwts[ii,:] *= 10**(-piahr[ii,:]/10)*np.exp(1j*np.deg2rad(kvr[ii,:]))
                         staticVwts[ii,:] *= 10**(-piavr[ii,:]/10)*np.exp(1j*np.deg2rad(khr[ii,:]))
                     if ii < nRx-1:
-                        Ae = getUlaWts(rxTheta[ii,:],rxPhi[ii,:],rxG)
+                        #Ae = getUlaWts(rxTheta[ii,:],rxPhi[ii,:],rxG,rxOrient)*_lambda**2/(4*np.pi)
+                        tmp = getUlaWts(rxTheta[ii,:],rxPhi[ii,:],rxG,rxOrient)
+                        tmp = np.ones(tmp.shape)*10**(rxG/10)
+                        Ae = tmp*_lambda**2/(4*np.pi)
                         staticHwts[ii,:] *= np.sqrt(Ae)
                         staticVwts[ii,:] *= np.sqrt(Ae)  
                         #staticVwts[ii,:] = np.sqrt(vwt*ptVolume*cn2eta(_lambda,cn,thetaS)*Ae)/(4*np.pi*rxr[ii,:,:])
@@ -1403,6 +1409,7 @@ def simulate(radarStruct,wxStruct):
                 for jj in range(nRx): #for each receiver
                       #Get sorted pts by bistatic range for current receiver
                       ptsr = pts[:,sortInds[jj,:]]
+
         
                       #Initialize object lists for storing range bin data
                       ncp = np.zeros((nr[jj]))
@@ -1417,7 +1424,7 @@ def simulate(radarStruct,wxStruct):
                           mskIndices.append(mski)
                           ncp[kk] = len(mski)
                           if len(mski) > 0:
-                              if att:
+                              if att and tmMode:
                                   curHwts.append(staticHwts[jj,mski]*10**(-piaht[mski]/10)*np.exp(1j*np.deg2rad(kht[mski]))) #Get wts for those points
                                   curVwts.append(staticVwts[jj,mski]*10**(-piavt[mski]/10)*np.exp(1j*np.deg2rad(kvt[mski]))) 
                               else:
@@ -1453,8 +1460,11 @@ def simulate(radarStruct,wxStruct):
                                   txWts = (getArrayWts2(phi,theta,patMatrix,np.array((c1[qq], c2[qq])),txG)*_lambda)**2/(4*np.pi*rangeFactor)
                           #Sum across samples and scale to form IQ
                           for kk in range(nr[jj]):
-                              Hpower[jj][ii,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curHwts[kk],Pt)
-                              Vpower[jj][ii,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curVwts[kk],Pt)
+                              if len(mskIndices[kk]) > 0:
+                                  mskTh = np.abs(phi[mskIndices[kk]])<np.pi/2
+                                  wtsm = mskIndices[kk][mskTh]
+                                  Hpower[jj][ii,ll,kk,qq] = np.sqrt(Pt)*np.einsum('i,i',txWts[wtsm],curHwts[kk][mskTh])
+                                  Vpower[jj][ii,ll,kk,qq] = np.sqrt(Pt)*np.einsum('i,i',txWts[wtsm],curVwts[kk][mskTh])
                           end = timer()
                           azTime = end-start
     elif scanType == 'rhi':
@@ -1463,7 +1473,7 @@ def simulate(radarStruct,wxStruct):
             #os.chdir('/Users/semmerson/Documents/cm1r19.10/grinder')
             #os.chdir('/Users/semmerson/Documents/python/data/may7/may_7_250m')
             #Zv,uu,vv,ww = getWrf(wrfDate,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2])
-            uu,vv,ww,Zv,pds = getWrf(pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes)
+            uu,vv,ww,Zv,pds = getWrf(wrfFile,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes)
     
             inds = np.where(np.log10(Zv) > 0)[0]
             nPts = len(inds)
@@ -1487,21 +1497,21 @@ def simulate(radarStruct,wxStruct):
             ind_l = [inds[i::nt] for i in range(nt)]
             
             del uu,vv,ww
-            if att:
+            if att and tmMode:
                 natt = 50
                 piahr = np.zeros((int(nRx),int(nPts)))
                 piavr = np.zeros((int(nRx),int(nPts)))
                 khr = np.zeros((int(nRx),int(nPts)))
                 kvr = np.zeros((int(nRx),int(nPts)))
                 print('Calculating Attenuation and Phase Shift:')
-                kht,kvt,piaht,piavt = getKA(pts/1000+wrfOffset[:,np.newaxis],txPos/1000+wrfOffset,natt,ptypes,A_table)
+                kht,kvt,piaht,piavt = getKA(wrfFile,pts/1000+wrfOffset[:,np.newaxis],txPos/1000+wrfOffset,natt,ptypes,A_table)
                 piahr[-1,:] = np.copy(piaht)
                 piavr[-1,:] = np.copy(piavt)
                 khr[-1,:] = np.copy(kht)
                 kvr[-1,:] = np.copy(kvt)
                 for i in range(nRx-1):
                     print(f'Receiver {i+1} of {nRx}')
-                    khr[i,:],kvr[i,:],piahr[i,:], piavr[i,:] = getKA(pts/1000+wrfOffset[:,np.newaxis],rxPos[i,:]/1000+wrfOffset,natt,ptypes,A_table)
+                    khr[i,:],kvr[i,:],piahr[i,:], piavr[i,:] = getKA(wrfFile,pts/1000+wrfOffset[:,np.newaxis],rxPos[i,:]/1000+wrfOffset,natt,ptypes,A_table)
             #os.chdir('/Users/semmerson/Documents/MATLAB/bistaticSimulator')
             staticHwts = np.zeros((int(nRx),int(nPts))).astype('complex64')
             staticVwts = np.zeros((int(nRx),int(nPts))).astype('complex64')
@@ -1580,11 +1590,11 @@ def simulate(radarStruct,wxStruct):
                         staticVwts[ii,:] = np.sqrt(vwt*ptVolume)/(4*np.pi*rxr[ii,:])*np.exp(1j*2*np.pi*rxr[ii,:]/_lambda)
                     elif scatMode == 'bragg':
                         print('bragg?')
-                    if att:
+                    if att and tmMode:
                         staticHwts[ii,:] *= 10**(-piahr[ii,:]/10)*np.exp(1j*np.deg2rad(kvr[ii,:]))
                         staticVwts[ii,:] *= 10**(-piavr[ii,:]/10)*np.exp(1j*np.deg2rad(khr[ii,:]))
                     if ii < nRx-1:
-                        Ae = getUlaWts(rxTheta[ii,:],rxPhi[ii,:],rxG)*_lambda**2/(4*np.pi)
+                        Ae = getUlaWts(rxTheta[ii,:],rxPhi[ii,:],rxG,rxOrient)*_lambda**2/(4*np.pi)
                         staticHwts[ii,:] *= np.sqrt(Ae)
                         staticVwts[ii,:] *= np.sqrt(Ae)  
                         #staticVwts[ii,:] = np.sqrt(vwt*ptVolume*cn2eta(_lambda,cn,thetaS)*Ae)/(4*np.pi*rxr[ii,:,:])
@@ -1629,7 +1639,7 @@ def simulate(radarStruct,wxStruct):
                           mskIndices.append(mski)
                           ncp[kk] = len(mski)
                           if len(mski) > 0:
-                              if att:
+                              if att and tmMode:
                                   curHwts.append(staticHwts[jj,mski]*10**(-piaht[mski]/10)*np.exp(-1j*np.deg2rad(kht[mski]))) #Get wts for those points
                                   curVwts.append(staticVwts[jj,mski]*10**(-piavt[mski]/10)*np.exp(-1j*np.deg2rad(kvt[mski]))) 
                               else:
@@ -1652,8 +1662,8 @@ def simulate(radarStruct,wxStruct):
                           #Get position relative to receiver
                           (theta, phi,r) = getRelPos(txPos,txRef[:,ii],ptsr)
                           #Calculate terms for phase delay and attenuation
-                          # rf = -1j*2*np.pi*r/_lambda
-                          # rangeFactor = r*ne.evaluate('exp(rf)') 
+                          #rf = -1j*2*np.pi*r/_lambda
+                          #rangeFactor = r*ne.evaluate('exp(rf)') 
                           rangeFactor = r*np.exp(-1j*2*np.pi*r/_lambda)
                           #Get transmit antenna weights
                           if dishMode:
@@ -1668,6 +1678,7 @@ def simulate(radarStruct,wxStruct):
                                   txWts = (getArrayWts2(phi,theta,patMatrix,np.array((c1[qq], c2[qq])),txG)*_lambda)**2/(4*np.pi*rangeFactor)
                           #Sum across samples and scale to form IQ
                           for kk in range(nr[jj]):
+                              print(mskIndices[kk].shape,phi.shape,txWts.shape,curHwts[kk].shape)
                               Hpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curHwts[kk],Pt)
                               Vpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curVwts[kk],Pt)
                           end = timer()
@@ -1676,16 +1687,18 @@ def simulate(radarStruct,wxStruct):
     return Hpower, Vpower, rr
 
 #beams = np.array([[False,True,False],[False,False,False],[False,False,True],[True,False,False]])
-beams = np.array([[True,False,False]])
+beams = np.array([[False,False,False]])
 mode = beams[0,:]
 
 # This is where the Tx and Rx positions are configured, relative to the simulation origin
 # The last x,y,z entries for Rx MUST be 0 to provide a monostatic location 
-x = np.array([-1.0,0.0])*1e3
-y = np.array([0.0,0.0])*1e3
+#x = np.concatenate([np.arange(8)*0.05-20e3,np.arange(8)*0.0,np.array([0.0])])
+#y = np.concatenate([np.arange(8)*0.0,np.arange(8)*0.05+20e3,np.array([0.0])])
+x = np.array([0.0])
+y = np.array([0.0])
 z = np.zeros(len(x))
 # Tx position
-txPos = np.array([0.0,-10.0,0.0])*1e3
+txPos = np.array([15.0,-15.0,0.0])*1e3
 
 pos = np.stack((x,y,z)).T+txPos
 radarStruct = makeRadarStruct(txPos=txPos,rxPos=pos,modes=mode)
@@ -1729,7 +1742,7 @@ nEl = txMechEl.shape[0]
 Ts = 1/fs 
 T0 = 290
 Trec = T0*(10**(Frx/10)-1) 
-B = fs 
+B = fs
 k = 1.381e-23 
 N0 = k*(Tant+Trec)*B*1e9
 cn = 1e-14
@@ -1773,7 +1786,7 @@ for i in range(nRx):
     vpp.append(np.sum(np.abs(Vpower[i])**2,axis=3)/radarStruct['M'])
     rho = (np.sum(np.abs((Hpower[i])*np.conj(Vpower[i])),axis=3)/radarStruct['M'])/np.sqrt(hpp[i]*vpp[i])
     rhohv.append(rho)
-    phidp = 0.5*np.rad2deg(np.angle(1/M*np.sum(np.conj(Hpower[i])*Vpower[i],axis=3)))
+    phidp = np.rad2deg(np.angle(1/M*np.sum(np.conj(Hpower[i])*Vpower[i],axis=3)))
     phi.append(phidp)
     snr.append(vpp[i]/N0)
     #f = unwrap_phase(np.angle(np.sum(np.conj(Vpower[i][:,:,:,:-1])*Vpower[i][:,:,:,1:],axis=3)))
@@ -1810,8 +1823,8 @@ noiseApplied = True
 
 if saveMode:
     radars = {}
-    # radars['Hpower'] = [arr.astype('complex64') for arr in Hpower]
-    # radars['Vpower'] = [arr.astype('complex64') for arr in Vpower]
+    radars['Hpower'] = [arr.astype('complex64') for arr in Hpower]
+    radars['Vpower'] = [arr.astype('complex64') for arr in Vpower]
     radars['hpp'] = [arr.astype('float32') for arr in hpp]
     radars['vpp'] = [arr.astype('float32') for arr in vpp]
     radars['rr'] = rr
@@ -1819,9 +1832,9 @@ if saveMode:
     radars['df'] = [arr.astype('float32') for arr in df]
     radars['phi'] = [arr.astype('float32') for arr in phi]
     # radars['vel'] = [arr.astype('float32') for arr in vels]
-    # radars['xx'] = xx
-    # radars['yy'] = yy
-    # radars['zz'] = zz
+    radars['xx'] = xx
+    radars['yy'] = yy
+    radars['zz'] = zz
     radars['br'] = br
     radars['beta'] = beta
     #os.chdir('/Users/semmerson/Documents/python/data/PRS')
