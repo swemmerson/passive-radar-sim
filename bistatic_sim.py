@@ -5,12 +5,12 @@ Created on Thu Sep 17 13:53:46 2020
 
 @author: semmerson
 """
-import os, pickle, lzma,math
+import os, pickle, lzma, math
 import numpy as np
 import numexpr as ne
 import matplotlib.colors as colors
 import datetime as dt
-from multiprocessing import Pool
+#from multiprocessing import Pool
 from netCDF4 import Dataset
 from scipy.fftpack import fft2, fftshift
 from scipy import interpolate, signal
@@ -215,26 +215,26 @@ def makeRadarStruct(txPos,rxPos,modes=[True,False,False]):
     radar['txPos'] = txPos #Tx position
     radar['rxPos'] = rxPos #Rx position 
     radar['lambda'] = 0.1031 #Operating wavelength
-    radar['prt'] = 1/2000  #Tx PRT (s)
-    radar['tau'] = 1.5e-6 #Pulse width (s)
+    radar['prt'] = 1/4000  #Tx PRT (s)
+    radar['tau'] = 1e-6 #Pulse width (s)
     radar['fs'] = 1/radar['tau'] #Sampling Rate samples/s
     radar['Pt'] = 750e3 #Peak transmit power (W)
     radar['Tant'] = 63.36 #Antenna noise temp/brightness
     radar['Frx'] = 3 #Rx noise figure
-    radar['M'] = 8 #Pulses per dwell
+    radar['M'] = 64 #Pulses per dwell
     radar['rxMechTilt'] = 10.0 #Mechanical tilt of Rx antenna
     radar['rxOrient'] = 'horizontal'
-    radar['txMechEl'] = np.array([0.5])#Mechanical Tx elevation tilt 
+    radar['txMechEl'] = np.array([0.5])#Mechanical Tx elevation tilt #np.array([0.5,0.9,1.3,1.8,2.4,3.1,4.0,5.1,6.4,8.0,10.0,12.5,15.6,19.5])
     radar['txMechAz'] = 1 #Baseline mechanical Tx position
-    radar['txAz'] = np.mod(np.linspace(270,360,91),360) #Transmit azimuths
+    radar['txAz'] = np.mod(np.linspace(270, 360, 91),360) #Transmit azimuths
     radar['txEl'] = np.zeros(radar['txAz'].shape) #Electrical tx steering elv.
     radar['txG'] = 45.5 #Transmit antenna gain (dBi)
-    radar['rxG'] = 45.5 #Receive antenna gain (dBi)
-    radar['receiverGain'] = 60 #Receiver gain (dB)
+    radar['rxG'] = 65.5 #Receive antenna gain (dBi)
+    radar['receiverGain'] = 70 #Receiver gain (dB)
     radar['idealPat'] = modes[0] #Ideal pattern (pencil beam + no sidelobes)?
     radar['whitening'] = modes[1] #Whiten sidelobes?
     radar['dishMode'] = modes[2] #Emulate WSR-88D transmit pattern?
-    radar['tmMode'] = True #T-matrix scattering?
+    radar['tmMode'] = False #T-matrix scattering?
     radar['saveMode'] = True #Save radar outputs?
     radar['ptypes'] = ['rain','wet_hail'] #Precipitation type(s) for T-matrix scattering
     radar['attenuationMode'] = False #Include attenuation + phase shift?
@@ -245,15 +245,17 @@ def makeRadarStruct(txPos,rxPos,modes=[True,False,False]):
 def makeWxStruct():
     wx = {}
     wx['scatMode'] = 'rayleigh' #Rayleigh or Bragg scattering
-    wx['xSize'] = 30e3 #x,y,z dimensions of simulation volume (m)
-    wx['ySize'] = 30e3
+    wx['xSize'] = 20e3 #x,y,z dimensions of simulation volume (m)
+    wx['ySize'] = 20e3
     wx['zSize'] = 0.5e3
     wx['getZh'] = 'Zh=35*np.ones((1,nPts))' #Zh/Zv values for uniform test case
     wx['getZv'] = 'Zv=Zh'  
-    wx['wrfFile'] = ['cm1out_000001.nc','cm1out_000001.nc','cm1out_000001.nc','cm1out_000001.nc','cm1out_000001.nc'
+    wx['wrfFile'] = [f'cm1out_{20:06}.nc']
     wx['wrfDate'] = '2013-06-01 01:20:10' #NWP data query date: yyyy-mm-dd HH:MM:SS
-    wx['wrfOffset'] = np.array([0.0,15.0,0.25]) # offset of simulation volume np.array([-16,-6,0.5])
-                                               # from origin within NWP data                                           
+    wx['wrfOffset'] = np.array([-7.0,2.0,0.25]) # offset of simulation volume np.array([-16,-6,0.5])
+                                               # from origin within NWP data    
+                                               # supercell np.array([0.0,-7.5,0.25])
+                                               # multicell np.array([10.0,-15.0,0.25])
     wx['spw'] = 2 #Spectrum width
     wx['ptsPerMinVol'] = 3 #Number of points in smallest resolution volume
     return wx
@@ -539,6 +541,7 @@ def getRelPos(sensorPos,peakPt,scatPos):
 #rxtheta - angular distance from boresight
 #rxphi - angular rotation about boresight
 #rxr - range
+    scatPos = np.squeeze(scatPos)
     scatPos = scatPos - sensorPos[:,np.newaxis]
     peakPt = peakPt - sensorPos
     
@@ -552,6 +555,7 @@ def getRelPos(sensorPos,peakPt,scatPos):
     rotX = rotMat('x',xAngle)
     rotXZ = np.matmul(rotX,rotZ)
     scatPos = np.matmul(rotXZ,scatPos)
+    #print(scatPos.shape)
     es = np.einsum('ij,ij -> j',scatPos,scatPos)
     rxr = ne.evaluate('sqrt(es)')
     z = scatPos[2,:]/rxr
@@ -1245,6 +1249,8 @@ def simulate(radarStruct,wxStruct):
     nEl = txMechEl.shape[0]
     if scanType == 'ppi':
         for ll in range(nEl):
+            wrfFile = wrfFiles[ll]
+            print(wrfFile)
             print(f'Elevation {ll+1} of {nEl}')
             #os.chdir('/Users/semmerson/Documents/cm1r19.10/grinder')
             #os.chdir('/Users/semmerson/Documents/python/data/may7/may_7_250m')
@@ -1326,7 +1332,7 @@ def simulate(radarStruct,wxStruct):
                 #Reference pointing direction vector for transmitter
         
                 #Initialize variables
-                nPts = pts.shape[1]
+                nPts = pts.shape[-1]
                 rxPhi = np.zeros((nRx,nPts))
                 rxTheta = np.zeros((nRx,nPts))
                 rxr = np.zeros((nRx,nPts))
@@ -1335,6 +1341,7 @@ def simulate(radarStruct,wxStruct):
                     print('Receiver ',ii+1,' of ',nRx)
             
                     #Get scatterer positions relative to receiver
+                    
                     (rxTheta[ii,:], rxPhi[ii,:], rxr[ii,:]) = getRelPos(rxPos[ii,:],rxRef[:,ii],np.squeeze(pts))
                     #Get Rx antenna pattern weightings 
     
@@ -1355,6 +1362,7 @@ def simulate(radarStruct,wxStruct):
                             vwt[inds] = np.squeeze(weights[1])
     
                     else:
+                        print(pts.shape)
                         weights = bistaticWeights(txPos,rxPos[ii,:],pts)
                         hwt = np.squeeze(weights[0])*z2eta(Zv, _lambda)
                         vwt = np.squeeze(weights[1])*z2eta(Zv, _lambda)
@@ -1382,25 +1390,42 @@ def simulate(radarStruct,wxStruct):
                     br[ii,:] = getBistaticRanges(txPos,rxPos[ii,:],pts)
                 #Format bistatic range info 
                 br = np.squeeze(br)
-                if nRx == 1:
-                    br = br.T
-                    
+                # if nRx == 1:
+                #     br = br.T
+
                 # #Filter out unused scatterers based on bistatic range
-                rmsk = np.min(br,axis=0)>brmax
-                br = br[:,~rmsk]
-                staticHwts = staticHwts[:,~rmsk]
-                staticVwts = staticVwts[:,~rmsk]
-                pts = pts[:,~rmsk]
-                windSpeed = windSpeed[:,~rmsk]
-                Zv = Zv[~rmsk]
-                rxr = rxr[:,~rmsk]
-                    
-                sortInds = np.zeros(br.shape).astype(int)
-                for ii in range(nRx):
-                    sortInds[ii,:] = np.argsort(br[ii,:])
-                    br[ii,:] = np.sort(br[ii,:])
-                    staticHwts[ii,:] = staticHwts[ii,sortInds[ii,:]]
-                    staticVwts[ii,:] = staticVwts[ii,sortInds[ii,:]]
+                if nRx > 1:
+                    rmsk = np.min(br,axis=0)>brmax
+                    br = br[:,~rmsk]
+                    staticHwts = staticHwts[:,~rmsk]
+                    staticVwts = staticVwts[:,~rmsk]
+                    pts = pts[:,~rmsk]
+                    windSpeed = windSpeed[:,~rmsk]
+                    Zv = Zv[~rmsk]
+                    rxr = rxr[:,~rmsk]
+                    sortInds = np.zeros(br.shape).astype(int)
+                    for ii in range(nRx):
+                        sortInds[ii,:] = np.argsort(br[ii,:])
+                        br[ii,:] = np.sort(br[ii,:])
+                        staticHwts[ii,:] = staticHwts[ii,sortInds[ii,:]]
+                        staticVwts[ii,:] = staticVwts[ii,sortInds[ii,:]]
+                else:
+                    br = br[np.newaxis,:]
+                    rmsk = br > brmax
+                    br = br[~rmsk]
+                    staticHwts = staticHwts[~rmsk]
+                    staticVwts = staticVwts[~rmsk]
+                    pts = pts[:,np.squeeze(~rmsk)]
+                    windSpeed = windSpeed[:,np.squeeze(~rmsk)]
+                    Zv = Zv[np.squeeze(~rmsk)]
+                    rxr = rxr[~rmsk]
+                    #br = np.squeeze(br)
+                    br = br[np.newaxis,:]
+                    sortInds = np.argsort(br,axis=1)
+                    br = np.sort(br,axis=1)
+                    staticHwts = staticHwts[sortInds]
+                    staticVwts = staticVwts[sortInds]
+
                 staticHwts[np.isnan(staticHwts)] = 0
                 staticVwts[np.isnan(staticVwts)] = 0
                 del rxPhi,rxTheta 
@@ -1442,6 +1467,7 @@ def simulate(radarStruct,wxStruct):
                               print(f'Pt {qq+1} Rx {jj+1}: Elevation {ll+1}/{nEl} Azimuth {ii+1}/{nAz} ETA: {int(h)} h {int(m)} m {int(sec)} s')
                
                           #Get position relative to receiver
+                          print(txPos.shape,txRef[:,ii].shape,ptsr.shape)
                           (theta, phi,r) = getRelPos(txPos,txRef[:,ii],ptsr)
                           #Calculate terms for phase delay and attenuation
                           # rf = -1j*2*np.pi*r/_lambda
@@ -1469,6 +1495,7 @@ def simulate(radarStruct,wxStruct):
                           azTime = end-start
     elif scanType == 'rhi':
         for aa in range(nAz): #For each azimuth angle
+            wrfFile = wrfFiles[aa]
             print(f'Azimuth {aa+1} of {nAz}')
             #os.chdir('/Users/semmerson/Documents/cm1r19.10/grinder')
             #os.chdir('/Users/semmerson/Documents/python/data/may7/may_7_250m')
@@ -1559,6 +1586,7 @@ def simulate(radarStruct,wxStruct):
             
                     #Get scatterer positions relative to receiver
                     (rxTheta[ii,:], rxPhi[ii,:], rxr[ii,:]) = getRelPos(rxPos[ii,:],rxRef[:,ii],np.squeeze(pts))
+                    
                     #Get Rx antenna pattern weightings 
     
                     # else:
@@ -1602,8 +1630,8 @@ def simulate(radarStruct,wxStruct):
                     br[ii,:] = getBistaticRanges(txPos,rxPos[ii,:],pts)
                 #Format bistatic range info 
                 br = np.squeeze(br)
-                if nRx == 1:
-                    br = br.T
+                # if nRx == 1:
+                #     br = br.T
                     
                 # #Filter out unused scatterers based on bistatic range
                 rmsk = np.min(br,axis=0)>brmax
@@ -1661,6 +1689,7 @@ def simulate(radarStruct,wxStruct):
                
                           #Get position relative to receiver
                           (theta, phi,r) = getRelPos(txPos,txRef[:,ii],ptsr)
+
                           #Calculate terms for phase delay and attenuation
                           #rf = -1j*2*np.pi*r/_lambda
                           #rangeFactor = r*ne.evaluate('exp(rf)') 
@@ -1678,7 +1707,7 @@ def simulate(radarStruct,wxStruct):
                                   txWts = (getArrayWts2(phi,theta,patMatrix,np.array((c1[qq], c2[qq])),txG)*_lambda)**2/(4*np.pi*rangeFactor)
                           #Sum across samples and scale to form IQ
                           for kk in range(nr[jj]):
-                              print(mskIndices[kk].shape,phi.shape,txWts.shape,curHwts[kk].shape)
+                              #print(mskIndices[kk].shape,phi.shape,txWts.shape,curHwts[kk].shape)
                               Hpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curHwts[kk],Pt)
                               Vpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curVwts[kk],Pt)
                           end = timer()
@@ -1694,8 +1723,8 @@ mode = beams[0,:]
 # The last x,y,z entries for Rx MUST be 0 to provide a monostatic location 
 #x = np.concatenate([np.arange(8)*0.05-20e3,np.arange(8)*0.0,np.array([0.0])])
 #y = np.concatenate([np.arange(8)*0.0,np.arange(8)*0.05+20e3,np.array([0.0])])
-x = np.array([0.0])
-y = np.array([0.0])
+x = np.array([0.0])*1e3
+y = np.array([0.0])*1e3
 z = np.zeros(len(x))
 # Tx position
 txPos = np.array([15.0,-15.0,0.0])*1e3
@@ -1744,7 +1773,7 @@ T0 = 290
 Trec = T0*(10**(Frx/10)-1) 
 B = fs
 k = 1.381e-23 
-N0 = k*(Tant+Trec)*B*1e9
+N0 = k*(Tant+Trec)*B*1e12
 cn = 1e-14
 noiseApplied = True
 # f = loadmat('wrfDirectory.mat') #load NWP directory
@@ -1823,8 +1852,8 @@ noiseApplied = True
 
 if saveMode:
     radars = {}
-    radars['Hpower'] = [arr.astype('complex64') for arr in Hpower]
-    radars['Vpower'] = [arr.astype('complex64') for arr in Vpower]
+    # radars['Hpower'] = [arr.astype('complex64') for arr in Hpower]
+    # radars['Vpower'] = [arr.astype('complex64') for arr in Vpower]
     radars['hpp'] = [arr.astype('float32') for arr in hpp]
     radars['vpp'] = [arr.astype('float32') for arr in vpp]
     radars['rr'] = rr
