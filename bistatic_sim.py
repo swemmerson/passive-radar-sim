@@ -16,7 +16,7 @@ from scipy.fftpack import fft2, fftshift
 from scipy import interpolate, signal
 #from skimage.restoration import unwrap_phase
 from scipy.io import loadmat
-from numba import njit
+#from numba import njit
 #from pyart.map.grid_mapper import NNLocator
 from timeit import default_timer as timer
 
@@ -216,28 +216,28 @@ def makeRadarStruct(txPos,rxPos,modes=[True,False,False]):
     radar['rxPos'] = rxPos #Rx position 
     radar['lambda'] = 0.1031 #Operating wavelength
     radar['prt'] = 1/4000  #Tx PRT (s)
-    radar['tau'] = 1e-6 #Pulse width (s)
+    radar['tau'] = 1.57e-6 #Pulse width (s)
     radar['fs'] = 1/radar['tau'] #Sampling Rate samples/s
     radar['Pt'] = 750e3 #Peak transmit power (W)
     radar['Tant'] = 63.36 #Antenna noise temp/brightness
     radar['Frx'] = 3 #Rx noise figure
     radar['M'] = 64 #Pulses per dwell
-    radar['rxMechTilt'] = 10.0 #Mechanical tilt of Rx antenna
+    radar['rxMechTilt'] = 2.0 #Mechanical tilt of Rx antenna
     radar['rxOrient'] = 'horizontal'
-    radar['txMechEl'] = np.array([0.5])#Mechanical Tx elevation tilt #np.array([0.5,0.9,1.3,1.8,2.4,3.1,4.0,5.1,6.4,8.0,10.0,12.5,15.6,19.5])
+    radar['txMechEl'] = np.array([0.5]) #  #Mechanical Tx elevation tilt np.array([0.5,0.9,1.3,1.8,2.4,3.1,4.0,5.1,6.4,8.0,10.0,12.5,15.6,19.5]) 
     radar['txMechAz'] = 1 #Baseline mechanical Tx position
-    radar['txAz'] = np.mod(np.linspace(270, 360, 91),360) #Transmit azimuths
+    radar['txAz'] = np.mod(np.linspace(270, 360, 181),360) #Transmit azimuths
     radar['txEl'] = np.zeros(radar['txAz'].shape) #Electrical tx steering elv.
     radar['txG'] = 45.5 #Transmit antenna gain (dBi)
-    radar['rxG'] = 65.5 #Receive antenna gain (dBi)
-    radar['receiverGain'] = 70 #Receiver gain (dB)
+    radar['rxG'] = 45.0 #Receive antenna gain (dBi)
+    radar['receiverGain'] = 90 #Receiver gain (dB)
     radar['idealPat'] = modes[0] #Ideal pattern (pencil beam + no sidelobes)?
     radar['whitening'] = modes[1] #Whiten sidelobes?
     radar['dishMode'] = modes[2] #Emulate WSR-88D transmit pattern?
-    radar['tmMode'] = False #T-matrix scattering?
+    radar['tmMode'] = True #T-matrix scattering?
     radar['saveMode'] = True #Save radar outputs?
     radar['ptypes'] = ['rain','wet_hail'] #Precipitation type(s) for T-matrix scattering
-    radar['attenuationMode'] = False #Include attenuation + phase shift?
+    radar['attenuationMode'] = True #Include attenuation + phase shift?
     radar['scanType'] = 'ppi'
     return radar
 
@@ -245,25 +245,28 @@ def makeRadarStruct(txPos,rxPos,modes=[True,False,False]):
 def makeWxStruct():
     wx = {}
     wx['scatMode'] = 'rayleigh' #Rayleigh or Bragg scattering
-    wx['xSize'] = 20e3 #x,y,z dimensions of simulation volume (m)
-    wx['ySize'] = 20e3
-    wx['zSize'] = 0.5e3
+    wx['xSize'] = 30e3 #x,y,z dimensions of simulation volume (m)
+    wx['ySize'] = 30e3
+    wx['zSize'] = 0.3e3
     wx['getZh'] = 'Zh=35*np.ones((1,nPts))' #Zh/Zv values for uniform test case
     wx['getZv'] = 'Zv=Zh'  
-    wx['wrfFile'] = [f'cm1out_{20:06}.nc']
+    wx['wrfFile'] = 90*['/Volumes/raws/100m_supercell/24May_25km_100m-iso.04560.000000.nc']#[f'supercell/cm1out_{i:06}.nc' for i in np.arange(1,60,2)]
     wx['wrfDate'] = '2013-06-01 01:20:10' #NWP data query date: yyyy-mm-dd HH:MM:SS
-    wx['wrfOffset'] = np.array([-7.0,2.0,0.25]) # offset of simulation volume np.array([-16,-6,0.5])
+    wx['wrfOffset'] = np.array([-5.5,0.0,0.1]) # offset of simulation volume np.array([-16,-6,0.5])
                                                # from origin within NWP data    
                                                # supercell np.array([0.0,-7.5,0.25])
                                                # multicell np.array([10.0,-15.0,0.25])
+                                               # np.array([-5.5,6.0,0.0075])
     wx['spw'] = 2 #Spectrum width
+    wx['minVolRange'] = 2e3 #Minimum range to smallest resolution volume
     wx['ptsPerMinVol'] = 3 #Number of points in smallest resolution volume
+    wx['refThresh'] = 5.0 #Minimum simulated point reflectivity (dBZ)
     return wx
 
 def datenum64(d):
     return 366 + d.item().toordinal() + (d.item() - dt.datetime.fromordinal(d.item().toordinal())).total_seconds()/(24*60*60)
 
-def getWrf(fName,xq,yq,zq,ptypes):
+def getWrf(fName,xq,yq,zq,ptypes,tmMode):
     #Unit tested    
     fh = Dataset(fName, 'r')
     varNames = fh.variables.keys()
@@ -276,67 +279,71 @@ def getWrf(fName,xq,yq,zq,ptypes):
     zNames = ['z','zh']
     zName = [name for name in zNames if name in varNames][0] 
     ZZ = np.squeeze(fh.variables[zName][:])
-    uNames = ['u','uinterp']
+    uNames = ['uinterp']
     uName = [name for name in uNames if name in varNames][0] 
     UU = np.squeeze(fh.variables[uName][:])
-    vNames = ['v','vinterp']
+    vNames = ['vinterp']
     vName = [name for name in vNames if name in varNames][0] 
     VV = np.squeeze(fh.variables[vName][:])
-    wNames = ['w','winterp']
+    wNames = ['winterp']
     wName = [name for name in wNames if name in varNames][0] 
     WW = np.squeeze(fh.variables[wName][:])
     refNames = ['dbz','ref','reflectivity','REFL_10CM']
     refName = [name for name in refNames if name in varNames][0]    
     ref = np.squeeze(fh.variables[refName][:])
+    #ref = 10*np.log10(ref)
+    #ref[ref > 120] = 120.0
     rNames = ['qr']
     rName = [name for name in rNames if name in varNames][0] 
     qr = np.squeeze(fh.variables[rName][:])
-    sNames = ['qs']
-    sName = [name for name in sNames if name in varNames][0] 
-    qs = np.squeeze(fh.variables[sName][:])
-    if 'vhl' in varNames:
-        print('NSSL 2-moment microphysical data assumed')
-        rhow = 997
-        rhos = 100
-        hNames = ['qh','qhl']
-        hName = [name for name in hNames if name in varNames][0]  
-        rhog = np.squeeze(fh.variables[hName][:])/np.squeeze(fh.variables['vhl'][:])
-        cr = rhow*np.pi/6
-        cs = rhos*np.pi/6
-        dr = 3
-        ds = 3
-        pr = 0
-        ps = 0
-        lambda_r = (cr*np.squeeze(fh.variables['crw'][:])*math.factorial(pr+dr)/np.squeeze(fh.variables['qr'][:]))**(1/dr)/1000
-        n0_r = np.squeeze(fh.variables['crw'][:])*lambda_r
-        lambda_g = (np.pi*rhog*np.squeeze(fh.variables['chl'][:])/np.squeeze(fh.variables[hName][:]))**(1/3)/1000
-        n0_g = np.squeeze(fh.variables['chl'][:])*lambda_g
-        lambda_s = (cs*np.squeeze(fh.variables['csw'][:])*math.factorial(ps+ds)/np.squeeze(fh.variables['qs'][:]))**(1/ds)/1000
-        n0_s = np.squeeze(fh.variables['csw'][:])*lambda_s
-    else:
-        print('Morrison microphysical data assumed')
-        ntr = np.squeeze(fh.variables['ncr'][:])
-        ntg = np.squeeze(fh.variables['ncg'][:])
-        nts = np.squeeze(fh.variables['ncs'][:])
-        qg = np.squeeze(fh.variables['qg'][:])
-        rhow = 997
-        rhog = 900
-        rhos = 100
-        cr = rhow*np.pi/6
-        cg = rhog*np.pi/6
-        cs = rhos*np.pi/6
-        dr = 3
-        dg = 3
-        ds = 3
-        pr = 0
-        pg = 0
-        ps = 0
-        lambda_r = (cr*ntr*math.factorial(pr+dr)/qr)**(1/dr)/1000
-        n0_r = ntr*lambda_r
-        lambda_g = (cg*ntg*math.factorial(pg+dg)/qg)**(1/dg)/1000
-        n0_g = ntg*lambda_g
-        lambda_s = (cs*nts*math.factorial(ps+ds)/qs)**(1/ds)/1000
-        n0_s = nts*lambda_s
+    #sNames = ['qs']
+    #sName = [name for name in sNames if name in varNames][0] 
+    #qs = np.squeeze(fh.variables[sName][:])
+    if tmMode:
+        if 'vhl' in varNames:
+            print('NSSL 2-moment microphysical data assumed')
+            rhow = 997
+            rhos = 100
+            hNames = ['qh','qhl']
+            hName = [name for name in hNames if name in varNames][0]  
+            rhog = np.squeeze(fh.variables[hName][:])/np.squeeze(fh.variables['vhl'][:])
+            cr = rhow*np.pi/6
+            cs = rhos*np.pi/6
+            dr = 3
+            ds = 3
+            pr = 0
+            ps = 0
+            lambda_r = (cr*np.squeeze(fh.variables['crw'][:])*math.factorial(pr+dr)/np.squeeze(fh.variables['qr'][:]))**(1/dr)/1000
+            n0_r = np.squeeze(fh.variables['crw'][:])*lambda_r
+            lambda_g = (np.pi*rhog*np.squeeze(fh.variables['chl'][:])/np.squeeze(fh.variables[hName][:]))**(1/3)/1000
+            n0_g = np.squeeze(fh.variables['chl'][:])*lambda_g
+            #lambda_s = (cs*np.squeeze(fh.variables['csw'][:])*math.factorial(ps+ds)/np.squeeze(fh.variables['qs'][:]))**(1/ds)/1000
+            #n0_s = np.squeeze(fh.variables['csw'][:])*lambda_s
+        else:
+            print('Morrison microphysical data assumed')
+            ntr = np.squeeze(fh.variables['ncr'][:])
+            ntg = np.squeeze(fh.variables['ncg'][:])
+            #nts = np.squeeze(fh.variables['ncs'][:])
+            qg = np.squeeze(fh.variables['qg'][:])/1000
+            qr = np.squeeze(fh.variables['qr'][:])/1000
+            rhow = 997
+            rhog = 900
+            rhos = 100
+            cr = rhow*np.pi/6
+            cg = rhog*np.pi/6
+            cs = rhos*np.pi/6
+            dr = 3
+            dg = 3
+            ds = 3
+            pr = 0
+            pg = 0
+            ps = 0
+            lambda_r = (cr*ntr*math.factorial(pr+dr)/qr)**(1/dr)/1000
+            n0_r = ntr*lambda_r
+            lambda_g = (cg*ntg*math.factorial(pg+dg)/qg)**(1/dg)/1000
+            n0_g = ntg*lambda_g
+            #lambda_s = (cs*nts*math.factorial(ps+ds)/qs)**(1/ds)/1000
+            #n0_s = nts*lambda_s
     fh.close()
     #Get boundaries of NWP and query points
     pds = {}
@@ -369,25 +376,26 @@ def getWrf(fName,xq,yq,zq,ptypes):
         # ww = 0*np.ones(xq.shape)
         rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),10**(ref/10))
         Zv = rgi(np.array([zq,yq,xq]).T)
-        for ptype in ptypes:
-            if ptype in ['dry_hail','hail','wet_hail']:
-                rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_g))
-                pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
-                rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_g))
-                pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)  
-            elif ptype == 'rain':
-                rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_r))
-                pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
-                rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_r))
-                pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)
-            elif ptype in ['snow','dry_snow']:
-                rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_s))
-                pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
-                rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_s))
-                pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)
+        if tmMode:
+            for ptype in ptypes:
+                if ptype in ['dry_hail','hail','wet_hail']:
+                    rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_g))
+                    pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
+                    rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_g))
+                    pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)  
+                elif ptype == 'rain':
+                    rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_r))
+                    pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
+                    rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_r))
+                    pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)
+                elif ptype in ['snow','dry_snow']:
+                    rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_s))
+                    pds[ptype]['lambda'] = rgi(np.array([zq,yq,xq]).T)
+                    rgi = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_s))
+                    pds[ptype]['n0'] = rgi(np.array([zq,yq,xq]).T)
         return (uu,vv,ww,Zv,pds)
     else:
-        print('Specified volume out of bounds.')
+        print(f'Specified volume out of bounds. {xgood} {ygood} {zgood}')
     
 def init_KA_table(Lambda,ptype,_type):
     fn = f'{np.round(Lambda*1000,1)}mm_{_type}_{ptype}.xz'
@@ -427,9 +435,9 @@ def getKA(fName,pts,pos,nump,ptypes,table):
     rNames = ['qr']
     rName = [name for name in rNames if name in varNames][0] 
     qr = np.squeeze(fh.variables[rName][:])
-    sNames = ['qs']
-    sName = [name for name in sNames if name in varNames][0] 
-    qs = np.squeeze(fh.variables[sName][:])
+    #sNames = ['qs']
+    #sName = [name for name in sNames if name in varNames][0] 
+    #qs = np.squeeze(fh.variables[sName][:])
     if 'vhl' in varNames:
         rhow = 997
         rhos = 100
@@ -451,7 +459,7 @@ def getKA(fName,pts,pos,nump,ptypes,table):
     else:
         ntr = np.squeeze(fh.variables['ncr'][:])
         ntg = np.squeeze(fh.variables['ncg'][:])
-        nts = np.squeeze(fh.variables['ncs'][:])
+        #nts = np.squeeze(fh.variables['ncs'][:])
         qg = np.squeeze(fh.variables['qg'][:])
         rhow = 997
         rhog = 900
@@ -461,69 +469,66 @@ def getKA(fName,pts,pos,nump,ptypes,table):
         cs = rhos*np.pi/6
         dr = 3
         dg = 3
-        ds = 3
+        #ds = 3
         pr = 0
         pg = 0
-        ps = 0
+        #ps = 0
         lambda_r = (cr*ntr*math.factorial(pr+dr)/qr)**(1/dr)/1000
         n0_r = ntr*lambda_r
         lambda_g = (cg*ntg*math.factorial(pg+dg)/qg)**(1/dg)/1000
         n0_g = ntg*lambda_g
-        lambda_s = (cs*nts*math.factorial(ps+ds)/qs)**(1/ds)/1000
-        n0_s = nts*lambda_s
+        #lambda_s = (cs*nts*math.factorial(ps+ds)/qs)**(1/ds)/1000
+        #n0_s = nts*lambda_s
     fh.close()
-    l_r_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_r),method='nearest')
-    n_r_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_r),method='nearest')
-    l_g_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_g),method='nearest')
-    n_g_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_g),method='nearest')
-    l_s_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_s),method='nearest')
-    n_s_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_s),method='nearest')    
-    for i in range(nump):
-        print("Point ",i+1)
-        l_r = l_r_i(qpts[::-1,:,i].T)
-        n_r = n_r_i(qpts[::-1,:,i].T)
-        l_g = l_g_i(qpts[::-1,:,i].T)
-        n_g = n_g_i(qpts[::-1,:,i].T)
-        l_s = l_s_i(qpts[::-1,:,i].T)
-        n_s = n_s_i(qpts[::-1,:,i].T)
-        l_r[l_r < -0.5] = -0.5
-        l_r[l_r > 1.7] = 1.7
-        n_r[n_r < -10] = -10
-        n_r[n_r > 7] = 7
-        l_g[l_g < -0.5] = -0.5
-        l_g[l_g > 1.7] = 1.7
-        n_g[n_g < -10] = -10
-        n_g[n_g > 7] = 7
-        l_s[l_s < -0.5] = -0.5
-        l_s[l_s > 1.7] = 1.7
-        n_s[n_s < -10] = -10
-        n_s[n_s > 7] = 7
-        for t in ptypes:
-            inters = table[t]['A_inters']
-            H_inter = inters[0]
-            V_inter = inters[1]
-            if t == 'rain':
-                Ah += H_inter(np.stack((n_r,l_r)).T)*DR
-                Av += V_inter(np.stack((n_r,l_r)).T)*DR
-            elif t == 'snow':
-                Ah += H_inter(np.stack((n_s,l_s)).T)*DR
-                Av += V_inter(np.stack((n_s,l_s)).T)*DR
-            else:
-                Ah += H_inter(np.stack((n_g,l_g)).T)*DR
-                Av += V_inter(np.stack((n_g,l_g)).T)*DR
-            inters = table[t]['K_inters']
-            H_inter = inters[0]
-            V_inter = inters[1]
-            if t == 'rain':
-                Kh += H_inter(np.stack((n_r,l_r)).T)*DR
-                Kv += V_inter(np.stack((n_r,l_r)).T)*DR
-            elif t == 'snow':
-                Kh += H_inter(np.stack((n_s,l_s)).T)*DR
-                Kv += V_inter(np.stack((n_s,l_s)).T)*DR
-            else:
-                Kh += H_inter(np.stack((n_g,l_g)).T)*DR
-                Kv += V_inter(np.stack((n_g,l_g)).T)*DR
-    #Compute attenuation field (dB/km)
+    l_r_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_r),bounds_error=False, fill_value=None)
+    n_r_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_r),bounds_error=False, fill_value=None)
+    l_g_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_g),bounds_error=False, fill_value=None)
+    n_g_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_g),bounds_error=False, fill_value=None)
+    #l_s_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(lambda_s),method='nearest')
+    #n_s_i = interpolate.RegularGridInterpolator((ZZ,YY,XX),np.log10(n0_s),method='nearest')
+ 
+    # Vectorized: query all nump path segments at once.
+    # qpts shape: (3, npts, nump); transpose to (nump, npts, 3) then reshape to (nump*npts, 3)
+    qpts_T = qpts[::-1,:,:].transpose(2, 1, 0)  # (nump, npts, 3) with z,y,x ordering
+    flat = qpts_T.reshape(-1, 3)                  # (nump*npts, 3)
+ 
+    l_r_all = l_r_i(flat).reshape(nump, npts)
+    n_r_all = n_r_i(flat).reshape(nump, npts)
+    l_g_all = l_g_i(flat).reshape(nump, npts)
+    n_g_all = n_g_i(flat).reshape(nump, npts)
+    #l_s_all = l_s_i(flat).reshape(nump, npts)
+    #n_s_all = n_s_i(flat).reshape(nump, npts)
+ 
+    # Clamp all arrays at once
+    l_r_all = np.clip(l_r_all, -0.5, 1.7)
+    n_r_all = np.clip(n_r_all, -10, 7)
+    l_g_all = np.clip(l_g_all, -0.5, 1.7)
+    n_g_all = np.clip(n_g_all, -10, 7)
+    #l_s_all = np.clip(l_s_all, -0.5, 1.7)
+    #n_s_all = np.clip(n_s_all, -10, 7)
+ 
+    for t in ptypes:
+        A_inters = table[t]['A_inters']
+        K_inters = table[t]['K_inters']
+        HA_inter, VA_inter = A_inters[0], A_inters[1]
+        HK_inter, VK_inter = K_inters[0], K_inters[1]
+        if t == 'rain':
+            lr, nr_ = l_r_all, n_r_all
+        elif t == 'snow':
+            lr, nr_ = l_s_all, n_s_all
+        else:
+            lr, nr_ = l_g_all, n_g_all
+        # Stack all nump*npts query points at once
+        query = np.stack((nr_.ravel(), lr.ravel()), axis=1)  # (nump*npts, 2)
+        Ah_contrib = HA_inter(query).reshape(nump, npts)
+        Av_contrib = VA_inter(query).reshape(nump, npts)
+        Kh_contrib = HK_inter(query).reshape(nump, npts)
+        Kv_contrib = VK_inter(query).reshape(nump, npts)
+        # Multiply by DR (per-point step size, shape npts) and sum over nump segments
+        Ah += (Ah_contrib * DR[np.newaxis, :]).sum(axis=0)
+        Av += (Av_contrib * DR[np.newaxis, :]).sum(axis=0)
+        Kh += (Kh_contrib * DR[np.newaxis, :]).sum(axis=0)
+        Kv += (Kv_contrib * DR[np.newaxis, :]).sum(axis=0)
     
     del qpts
     return (Kh,Kv,Ah,Av)
@@ -659,6 +664,7 @@ def getThetaS(pts,txPos,rxPos):
     return thetaS
 
 def bistaticWeights(txPos,rxPos,pts):
+    print(txPos,rxPos)
     #Unit tested
     #BISTATICWEIGHTS - gets bistatic scattering weights / loss factors from raindrops assuming dipole
     #model and no roll on antennas (explained in simulator section of Byrd 
@@ -760,7 +766,7 @@ def getTmatrixWeights(table,txPos,rxPos,pts,lamb,n0):
 
 def z2eta(Z,_lambda):
 #Z2ETA converts dBZ to eta in m^2/m^3
-    Ze = 10**(Z/10)*10**(-18)
+    Ze = 10**(Z/10)*10**(-6)
     Kw = 0.93
     eta = np.pi**5*Kw*Ze/_lambda**4
     return eta
@@ -968,124 +974,6 @@ def getBa(xx,yy,zz,rxPos):
     beta = np.arccos(np.sum(rxVecs*txVecs,axis=2)/(rxDist*txDist))*180/np.pi
     return beta
 
-def cressman(x1,y1,v1,xq,yq,R,minPts):
-    fs = xq.shape
-    xq = xq.flatten()
-    yq = yq.flatten()
-    v1c = np.zeros_like(xq)
-    R = R**2
-    for jj in range(len(xq)): 
-        v1c[jj] = cressmanVal(x1,y1,v1,xq[jj],yq[jj],R,minPts)
-    v1c = np.reshape(v1c,fs)
-    return v1c
-
-def barnes2(x1,y1,v1,xq,yq,R,minPts):
-    fs = xq.shape
-    xq = xq.flatten()
-    yq = yq.flatten()
-    v1c = np.zeros_like(xq)
-    R = R**2
-    for jj in range(len(xq)): 
-        v1c[jj] = barnesVal(x1,y1,v1,xq[jj],yq[jj],R,minPts)
-    v1c = np.reshape(v1c,fs)
-    return v1c
-@njit
-def cressmanVal(x1,y1,v1,xq,yq,R,minPts):
-    r1 = (x1 - xq)**2 + (y1 - yq)**2
-    msk = r1<R
-    vt = v1[msk]
-    r1 = r1[msk]
-
-    filt = np.isnan(vt)
-    if np.sum(filt)/(len(filt)+1e-6) > 0.8 or np.sum(~filt) < minPts:
-        return np.nan
-    else:
-        vt = vt[~filt]
-        r1 = r1[~filt]
-        w1 = (R - r1)/(R + r1+1e-6)
-        s = np.sum(w1)
-        if s == 0:
-            return np.nan
-        else:
-            return np.sum(w1*vt)/np.sum(w1)
-        
-@njit
-def barnesVal(x1,y1,v1,xq,yq,R,minPts):
-    r1 = (x1 - xq)**2 + (y1 - yq)**2
-    msk = r1<R
-    vt = v1[msk]
-    r1 = r1[msk]
-
-    filt = np.isnan(vt)
-    if np.sum(filt)/(len(filt)+1e-6) > 0.8 or np.sum(~filt) < minPts:
-        return np.nan
-    else:
-        vt = vt[~filt]
-        r1 = r1[~filt]
-        w1 = np.exp(-r1/(R*0.3))+1e-5
-        s = np.sum(w1)
-        if s == 0:
-            return np.nan
-        else:
-            return np.sum(w1*vt)/np.sum(w1)
-
-def dealias(vr):
-    nr,nb = vr.shape
-    vr_d = np.copy(vr)
-    va = np.nanmax(vr)
-    adj = np.array([0, 2*va, -2*va, 4*va, -4*va])
-    # Find lowest non-NaN value in first range ring (least likely to be aliased)
-    rad1 = np.where(abs(vr_d[:,0])==np.nanmin(abs(vr_d[:,0])))[0][0]
-    # Fill in NaN values in first range ring
-    for j in np.arange(rad1, nr):
-        if np.isnan(vr_d[j,0]) & np.isfinite(vr_d[j-1,0]):
-            if j == 0:
-                vr_d[j,0] = vr_d[nr-1,0]
-            else:
-                vr_d[j,0] = vr_d[j-1,0]
-    for j in np.arange(0,rad1):
-        if j == 0:
-            if np.isnan(vr_d[j,0]) & np.isfinite(vr_d[nr-1,0]):
-                vr_d[j,0] = vr_d[nr-1,0]
-        else:
-            if np.isnan(vr_d[j,0]) & np.isfinite(vr_d[j-1,0]):
-                vr_d[j,0] = vr_d[j-1,0]
-    # Radially fill all NaN values
-    for i in np.arange(1,nb):
-        j = np.isnan(vr_d[:,i]) & np.isfinite(vr_d[:,i-1])
-        vr_d[j,i] = vr_d[j,i-1]
-    nrad = 3
-    nbin = 2
-    window = np.ones((nrad,nbin))
-    for j in np.arange(2,nb):
-        vals = vr_d[:,j]+adj[:,np.newaxis]
-        m = signal.convolve2d(vr_d[:,j-nbin:j],window,boundary='wrap')[nrad//2:-(nrad//2),0]/(nrad*nbin)
-        pos = abs(vals-m).argmin(axis=0)
-        vr_d[:,j] += adj[pos]
-        
-    # 1st radial dealiasing pass
-    
-        
-    # Find least aliased radial
-    r = np.mean(abs(vr_d),axis=1).argmin()
-    #Azimuthal deliasing pass
-    for i in np.arange(r+1,nr):
-        vals = vr_d[i,:]+adj[:,np.newaxis]
-        pos = abs(vr_d[i-1,:]-vals).argmin(axis=0)
-        vr_d[i,:] += adj[pos]
-    for i in np.arange(0, r-1):
-        vals = vr_d[i,:]+adj[:,np.newaxis]
-        if i == 0:
-            pos = abs(vr_d[nr-1,:]-vals).argmin(axis=0)
-        else:
-            pos = abs(vr_d[i-1,:]-vals).argmin(axis=0)
-        vr_d[i,:] += adj[pos]
-    # 2nd radial dealiasing pass with higher constraints
-    for j in np.arange(2,nb):
-        vals = vr_d[:,j]+adj[:,np.newaxis]
-        pos = abs(vals-np.mean(vr_d[:,j-2:j],axis=1)).argmin(axis=0)
-        vr_d[:,j] += adj[pos]
-    return vr_d
 
 def simulate(radarStruct,wxStruct):
     txPos = radarStruct['txPos'] #Transmitter pos
@@ -1120,7 +1008,7 @@ def simulate(radarStruct,wxStruct):
     zSize = wxStruct['zSize']
     wrfFiles = wxStruct['wrfFile']
     wrfDate = wxStruct['wrfDate'] #Date to be queried from WRF data
-    
+    reft = wxStruct['refThresh']
     #Spatial offset of sim volume within WRF volume
     wrfOffset = wxStruct['wrfOffset']
     
@@ -1203,8 +1091,17 @@ def simulate(radarStruct,wxStruct):
     
     # Populate scattering centers
     domainVolume = xSize*ySize*zSize
-    minVolSize = (np.sin(1.0*np.pi/180)*5e3)**2*c*tau/2
+    
+    minVolRange = wxStruct['minVolRange']
+    rmat = np.sqrt(np.sum((np.array([[-xSize/2,-ySize/2],[-xSize/2,ySize/2],[xSize/2,-ySize/2],[xSize/2,ySize/2]])-txPos[:2])**2,axis=1))
+    maxDomRange = np.max(rmat)
+    if ~((-xSize/2 < txPos[0]) & (xSize/2 > txPos[0]) & (-ySize/2 < txPos[1]) & (ySize/2 > txPos[1])):
+        minDomRange = np.min(rmat)
+        minVolRange = np.max([minVolRange,minDomRange])
+    #print(minVolRange)
+    minVolSize = (np.sin(1.0*np.pi/180)*minVolRange)**2*c*tau/2
     nPts = np.round(ptsPerMinVol * domainVolume/minVolSize)
+    #print(nPts)
     ptVolume = domainVolume/nPts
     np.random.seed(777)
     
@@ -1247,6 +1144,7 @@ def simulate(radarStruct,wxStruct):
     rr = []
     nAz = txAz.shape[0]
     nEl = txMechEl.shape[0]
+
     if scanType == 'ppi':
         for ll in range(nEl):
             wrfFile = wrfFiles[ll]
@@ -1255,25 +1153,28 @@ def simulate(radarStruct,wxStruct):
             #os.chdir('/Users/semmerson/Documents/cm1r19.10/grinder')
             #os.chdir('/Users/semmerson/Documents/python/data/may7/may_7_250m')
             #Zv,uu,vv,ww = getWrf(wrfDate,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2])
-            uu,vv,ww,Zv,pds = getWrf(wrfFile,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes)
-    
-            inds = np.where(np.log10(Zv) > 0)[0]
-            inds = np.ones(Zv.shape).astype(bool)
+            uu,vv,ww,Zv,pds = getWrf(wrfFile,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes,tmMode)
+            Zv[Zv > 1e20] = 1e20
+            inds = np.where(10*np.log10(Zv) > reft)[0]
+            #Zv /= 100
+            
+            #inds = np.ones(Zv.shape).astype(bool)
             nPts = len(inds)
             pts = pts[:,inds]
             Zv = Zv[inds]
             uu = uu[inds]
             vv = vv[inds]
             ww = ww[inds]
-            for ptype in ptypes:
-                pds[ptype]['lambda'] = pds[ptype]['lambda'][inds]
-                pds[ptype]['n0'] = pds[ptype]['n0'][inds]
+            if tmMode:
+                for ptype in ptypes:
+                    pds[ptype]['lambda'] = pds[ptype]['lambda'][inds]
+                    pds[ptype]['n0'] = pds[ptype]['n0'][inds]
             #Vectorize wind velocities
             windSpeed = np.zeros((3,int(nPts)))
             windSpeed[0,:] = uu
             windSpeed[1,:] = vv
             windSpeed[2,:] = ww
-            
+            initdT = 0.5
             inds = np.arange(nPts)
             np.random.shuffle(inds)
             nt = len(ptypes)
@@ -1313,7 +1214,7 @@ def simulate(radarStruct,wxStruct):
             nr = np.zeros((nRx),dtype=int)                
             for i in range(nRx):
                 brmin = np.sqrt(np.sum((rxPos[i,:]-txPos)**2))
-                brmax = 1.5e5
+                brmax = 2.1*maxDomRange
                 # if np.all(np.isclose(rxPos[i,:],txPos)):
                 #     brmax = brmax/2
                 rr.append(np.arange(brmin,brmax,c*Ts/2))
@@ -1357,15 +1258,17 @@ def simulate(radarStruct,wxStruct):
                     if tmMode:
                         for n,t in enumerate(ptypes):
                             inds = ind_l[n]
+                            #print(pts[:,inds])
+                            #print(pds[t]['lambda'][inds])
+                            #print(pds[t]['n0'][inds])
                             weights = getTmatrixWeights(S_table[t],txPos,rxPos[ii,:],pts[:,inds],pds[t]['lambda'][inds],pds[t]['n0'][inds])
                             hwt[inds] = np.squeeze(weights[0])
                             vwt[inds] = np.squeeze(weights[1])
     
                     else:
-                        print(pts.shape)
                         weights = bistaticWeights(txPos,rxPos[ii,:],pts)
-                        hwt = np.squeeze(weights[0])*z2eta(Zv, _lambda)
-                        vwt = np.squeeze(weights[1])*z2eta(Zv, _lambda)
+                        hwt = np.squeeze(weights[0])*z2eta(10*np.log10(Zv), _lambda)
+                        vwt = np.squeeze(weights[1])*z2eta(10*np.log10(Zv), _lambda)
             
                     # Do the "receive" half of the radar range equation (doesn't
                     # change with Tx pointing angle.  Convert from Z or Cn^2 to
@@ -1447,6 +1350,7 @@ def simulate(radarStruct,wxStruct):
                       for kk in range(nr[jj]):
                           mski = inRange2(rr[jj][kk],tau,br[jj,:]) #Find points in bin
                           mskIndices.append(mski)
+                          #print(len(mski))
                           ncp[kk] = len(mski)
                           if len(mski) > 0:
                               if att and tmMode:
@@ -1467,7 +1371,6 @@ def simulate(radarStruct,wxStruct):
                               print(f'Pt {qq+1} Rx {jj+1}: Elevation {ll+1}/{nEl} Azimuth {ii+1}/{nAz} ETA: {int(h)} h {int(m)} m {int(sec)} s')
                
                           #Get position relative to receiver
-                          print(txPos.shape,txRef[:,ii].shape,ptsr.shape)
                           (theta, phi,r) = getRelPos(txPos,txRef[:,ii],ptsr)
                           #Calculate terms for phase delay and attenuation
                           # rf = -1j*2*np.pi*r/_lambda
@@ -1500,18 +1403,20 @@ def simulate(radarStruct,wxStruct):
             #os.chdir('/Users/semmerson/Documents/cm1r19.10/grinder')
             #os.chdir('/Users/semmerson/Documents/python/data/may7/may_7_250m')
             #Zv,uu,vv,ww = getWrf(wrfDate,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2])
-            uu,vv,ww,Zv,pds = getWrf(wrfFile,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes)
-    
-            inds = np.where(np.log10(Zv) > 0)[0]
+            uu,vv,ww,Zv,pds = getWrf(wrfFile,pts[0,:]/1000+wrfOffset[0],pts[1,:]/1000+wrfOffset[1],pts[2,:]/1000+wrfOffset[2],ptypes,tmMode)
+            Zv[Zv > 1e20] = 1e20
+            inds = np.where(10*np.log10(Zv) > reft)[0]
+            Zv *= 1000
             nPts = len(inds)
             pts = pts[:,inds]
             Zv = Zv[inds]
             uu = uu[inds]
             vv = vv[inds]
             ww = ww[inds]
-            for ptype in ptypes:
-                pds[ptype]['lambda'] = pds[ptype]['lambda'][inds]
-                pds[ptype]['n0'] = pds[ptype]['n0'][inds]
+            if tmMode:
+                for ptype in ptypes:
+                    pds[ptype]['lambda'] = pds[ptype]['lambda'][inds]
+                    pds[ptype]['n0'] = pds[ptype]['n0'][inds]
             #Vectorize wind velocities
             windSpeed = np.zeros((3,int(nPts)))
             windSpeed[0,:] = uu
@@ -1557,7 +1462,7 @@ def simulate(radarStruct,wxStruct):
             nr = np.zeros((nRx),dtype=int)                
             for i in range(nRx):
                 brmin = np.sqrt(np.sum((rxPos[i,:]-txPos)**2))
-                brmax = 1e5
+                brmax = 1e4
                 # if np.all(np.isclose(rxPos[i,:],txPos)):
                 #     brmax = brmax/2
                 rr.append(np.arange(brmin,brmax,c*Ts/2))
@@ -1634,20 +1539,38 @@ def simulate(radarStruct,wxStruct):
                 #     br = br.T
                     
                 # #Filter out unused scatterers based on bistatic range
-                rmsk = np.min(br,axis=0)>brmax
-                br = br[:,~rmsk]
-                staticVwts = staticVwts[:,~rmsk]
-                pts = pts[:,~rmsk]
-                windSpeed = windSpeed[:,~rmsk]
-                Zv = Zv[~rmsk]
-                rxr = rxr[:,~rmsk]
-                    
-                sortInds = np.zeros(br.shape).astype(int)
-                for ii in range(nRx):
-                    sortInds[ii,:] = np.argsort(br[ii,:])
-                    br[ii,:] = np.sort(br[ii,:])
-                    staticHwts[ii,:] = staticHwts[ii,sortInds[ii,:]]
-                    staticVwts[ii,:] = staticVwts[ii,sortInds[ii,:]]
+                if nRx > 1:
+                    rmsk = np.min(br,axis=0)>brmax
+                    br = br[:,~rmsk]
+                    staticHwts = staticHwts[:,~rmsk]
+                    staticVwts = staticVwts[:,~rmsk]
+                    pts = pts[:,~rmsk]
+                    windSpeed = windSpeed[:,~rmsk]
+                    Zv = Zv[~rmsk]
+                    rxr = rxr[:,~rmsk]
+                    sortInds = np.zeros(br.shape).astype(int)
+                    for ii in range(nRx):
+                        sortInds[ii,:] = np.argsort(br[ii,:])
+                        br[ii,:] = np.sort(br[ii,:])
+                        staticHwts[ii,:] = staticHwts[ii,sortInds[ii,:]]
+                        staticVwts[ii,:] = staticVwts[ii,sortInds[ii,:]]
+                else:
+                    br = br[np.newaxis,:]
+                    rmsk = br > brmax
+                    br = br[~rmsk]
+                    staticHwts = staticHwts[~rmsk]
+                    staticVwts = staticVwts[~rmsk]
+                    pts = pts[:,np.squeeze(~rmsk)]
+                    windSpeed = windSpeed[:,np.squeeze(~rmsk)]
+                    Zv = Zv[np.squeeze(~rmsk)]
+                    rxr = rxr[~rmsk]
+                    #br = np.squeeze(br)
+                    br = br[np.newaxis,:]
+                    sortInds = np.argsort(br,axis=1)
+                    br = np.sort(br,axis=1)
+                    staticHwts = staticHwts[sortInds]
+                    staticVwts = staticVwts[sortInds]
+
                 staticHwts[np.isnan(staticHwts)] = 0
                 staticVwts[np.isnan(staticVwts)] = 0
                 del rxPhi,rxTheta 
@@ -1678,17 +1601,17 @@ def simulate(radarStruct,wxStruct):
                               curVwts.append(np.array([0]))
                       for ll in range(nEl): #For each elevation angle
                           start = timer()
-                          txRef = np.vstack((np.sin(txMechTheta[ll])*np.cos(txPhi)+txPos[0],
-                                         np.sin(txMechTheta[ll])*np.sin(txPhi)+txPos[1],
-                                         np.cos(txMechTheta[ll])*np.ones(txPhi.shape)+txPos[2]))
-                          if np.mod(ii+1,1) == 0: #Progress display
-                              timeLeft = ((nAz-ii-1)*M*nRx*nEl+(M-qq-1)*nRx*nEl+(nRx-jj-1)*nEl+(nEl-ll-1))*elTime
+                          txRef = np.vstack((np.sin(txMechTheta)*np.cos(txPhi[aa])+txPos[0],
+                                         np.sin(txMechTheta)*np.sin(txPhi[aa])+txPos[1],
+                                         np.cos(txMechTheta)+txPos[2]))
+                          if np.mod(ll+1,1) == 0: #Progress display
+                              timeLeft = ((nAz-aa-1)*M*nRx*nEl+(M-qq-1)*nRx*nEl+(nRx-jj-1)*nEl+(nEl-ll-1))*elTime
                               h,rem = divmod(timeLeft,3600)
                               m,sec = divmod(rem,60)
                               print(f'Pt {qq+1} Rx {jj+1}: Elevation {ll+1}/{nEl} Azimuth {aa+1}/{nAz} ETA: {int(h)} h {int(m)} m {int(sec)} s')
                
                           #Get position relative to receiver
-                          (theta, phi,r) = getRelPos(txPos,txRef[:,ii],ptsr)
+                          (theta, phi,r) = getRelPos(txPos,txRef[:,ll],ptsr)
 
                           #Calculate terms for phase delay and attenuation
                           #rf = -1j*2*np.pi*r/_lambda
@@ -1702,32 +1625,39 @@ def simulate(radarStruct,wxStruct):
                                   txWts = (dishInter(phi)*_lambda)**2/(4*np.pi*rangeFactor)
                           else:
                               if jj < nRx-1: #bistatic cases
-                                  txWts = getArrayWts2(phi,theta,patMatrix,np.array((c1[qq], c2[qq])),txG)/rangeFactor
+                                  txWts = getArrayWts2(phi,theta,patMatrix,np.array((c1[qq], c2[qq])),txG)*_lambda**2/(4*np.pi*rangeFactor)
                               else:
                                   txWts = (getArrayWts2(phi,theta,patMatrix,np.array((c1[qq], c2[qq])),txG)*_lambda)**2/(4*np.pi*rangeFactor)
+                          #print(np.max(txWts))
                           #Sum across samples and scale to form IQ
+                          # for kk in range(nr[jj]):
+                          #     #print(mskIndices[kk].shape,phi.shape,txWts.shape,curHwts[kk].shape)
+                          #     Hpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curHwts[kk],Pt)
+                          #     Vpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curVwts[kk],Pt)
                           for kk in range(nr[jj]):
-                              #print(mskIndices[kk].shape,phi.shape,txWts.shape,curHwts[kk].shape)
-                              Hpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curHwts[kk],Pt)
-                              Vpower[jj][aa,ll,kk,qq] = calcV(mskIndices[kk],phi,txWts,curVwts[kk],Pt)
+                              if len(mskIndices[kk]) > 0:
+                                  mskTh = np.abs(phi[mskIndices[kk]])<np.pi/2
+                                  wtsm = mskIndices[kk][mskTh]
+                                  Hpower[jj][aa,ll,kk,qq] = np.sqrt(Pt)*np.einsum('i,i',txWts[wtsm],curHwts[kk][mskTh])
+                                  Vpower[jj][aa,ll,kk,qq] = np.sqrt(Pt)*np.einsum('i,i',txWts[wtsm],curVwts[kk][mskTh])
                           end = timer()
                           azTime = end-start
     
     return Hpower, Vpower, rr
 
 #beams = np.array([[False,True,False],[False,False,False],[False,False,True],[True,False,False]])
-beams = np.array([[False,False,False]])
+beams = np.array([[True,False,False]])
 mode = beams[0,:]
 
 # This is where the Tx and Rx positions are configured, relative to the simulation origin
 # The last x,y,z entries for Rx MUST be 0 to provide a monostatic location 
 #x = np.concatenate([np.arange(8)*0.05-20e3,np.arange(8)*0.0,np.array([0.0])])
 #y = np.concatenate([np.arange(8)*0.0,np.arange(8)*0.05+20e3,np.array([0.0])])
-x = np.array([0.0])*1e3
-y = np.array([0.0])*1e3
+x = np.array([-30.0,0.0,0.0])*1e3
+y = np.array([0.0,30.0,0.0])*1e3
 z = np.zeros(len(x))
 # Tx position
-txPos = np.array([15.0,-15.0,0.0])*1e3
+txPos = np.array([15.0,-10.0,0.0])*1e3
 
 pos = np.stack((x,y,z)).T+txPos
 radarStruct = makeRadarStruct(txPos=txPos,rxPos=pos,modes=mode)
@@ -1786,7 +1716,7 @@ vpp = []
 rhohv = []
 snr = []
 df = []
-phi = []
+phidp = []
 
 vels = []
 xx = []
@@ -1794,7 +1724,7 @@ yy = []
 zz = []
 br = []
 beta = []
-snrThresh = 10**(0/10)
+snrThresh = 10**(-100/10)
 brThresh = 1e3
 
 txrxDist = np.sqrt(np.sum((txPos-rxPos)**2,axis=1))
@@ -1806,24 +1736,24 @@ for i in range(nRx):
     if ~noiseApplied:
         noiseMatH = np.sqrt(N0)/np.sqrt(2)*(np.random.normal(0,1,Hpower[i].shape) + 1j*np.random.normal(0,1,Hpower[i].shape))
         #noiseMatH = np.zeros(Hpower[i].shape)
-        Hpower[i] = Hpower[i]+noiseMatH
+        Hpower[i] = Hpower[i]+noiseMatH/10
         noiseMatV = np.sqrt(N0)/np.sqrt(2)*(np.random.normal(0,1,Vpower[i].shape) + 1j*np.random.normal(0,1,Vpower[i].shape))
         #noiseMatV = np.zeros(Vpower[i].shape)
-        Vpower[i] = Vpower[i]+noiseMatV
+        Vpower[i] = Vpower[i]+noiseMatV/10
 
     hpp.append(np.sum(np.abs(Hpower[i])**2,axis=3)/radarStruct['M'])
     vpp.append(np.sum(np.abs(Vpower[i])**2,axis=3)/radarStruct['M'])
     rho = (np.sum(np.abs((Hpower[i])*np.conj(Vpower[i])),axis=3)/radarStruct['M'])/np.sqrt(hpp[i]*vpp[i])
     rhohv.append(rho)
-    phidp = np.rad2deg(np.angle(1/M*np.sum(np.conj(Hpower[i])*Vpower[i],axis=3)))
-    phi.append(phidp)
+    phiDP = np.rad2deg(np.angle(1/M*np.sum(np.conj(Hpower[i])*Vpower[i],axis=3)))
+    phidp.append(phiDP)
     snr.append(vpp[i]/N0)
     #f = unwrap_phase(np.angle(np.sum(np.conj(Vpower[i][:,:,:,:-1])*Vpower[i][:,:,:,1:],axis=3)))
     f = np.angle(np.sum(np.conj(Vpower[i][:,:,:,:-1])*Vpower[i][:,:,:,1:],axis=3))
     hpp[i][snr[i] < snrThresh] = np.nan
     vpp[i][snr[i] < snrThresh] = np.nan
     f[snr[i] < snrThresh] = np.nan
-    phi[i][snr[i] < snrThresh] = np.nan
+    phidp[i][snr[i] < snrThresh] = np.nan
     rhohv[i][snr[i] < snrThresh] = np.nan
     df.append(f/(2*np.pi*radarStruct['prt']))
     # br.append(np.reshape(getBistaticRanges(txPos2,rxPos2[:,i],np.array((xx[i].flatten(),yy[i].flatten(),zz[i].flatten()))),xx[i].shape))
@@ -1859,7 +1789,7 @@ if saveMode:
     radars['rr'] = rr
     radars['snr'] = [arr.astype('float32') for arr in snr]
     radars['df'] = [arr.astype('float32') for arr in df]
-    radars['phi'] = [arr.astype('float32') for arr in phi]
+    radars['phidp'] = [arr.astype('float32') for arr in phidp]
     # radars['vel'] = [arr.astype('float32') for arr in vels]
     radars['xx'] = xx
     radars['yy'] = yy
